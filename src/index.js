@@ -1,69 +1,60 @@
-const encoder = new TextEncoder();
-
 const COOKIE = "lucidity_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 30;
 
-function json(data, status = 200, extraHeaders = {}) {
+const json = (data, status = 200, headers = {}) => {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
-      ...extraHeaders
+      ...headers
     }
   });
-}
+};
 
-function escapeHTML(value) {
-  return String(value ?? "").replace(/[&<>"']/g, function (c) {
-    return {
+const htmlEscape = (value = "") => {
+  return String(value).replace(/[&<>"']/g, (c) => {
+    const map = {
       "&": "&amp;",
       "<": "&lt;",
       ">": "&gt;",
       '"': "&quot;",
       "'": "&#39;"
-    }[c];
+    };
+    return map[c];
   });
-}
+};
 
-function randomHex(bytes) {
-  const array = new Uint8Array(bytes || 32);
+const randomHex = (bytes = 32) => {
+  const array = new Uint8Array(bytes);
   crypto.getRandomValues(array);
 
   return Array.from(array)
-    .map(function (x) {
-      return x.toString(16).padStart(2, "0");
-    })
+    .map((x) => x.toString(16).padStart(2, "0"))
     .join("");
-}
+};
 
 async function sha256(value) {
-  const result = await crypto.subtle.digest(
+  const encoder = new TextEncoder();
+
+  const hash = await crypto.subtle.digest(
     "SHA-256",
     encoder.encode(value)
   );
 
-  return Array.from(new Uint8Array(result))
-    .map(function (x) {
-      return x.toString(16).padStart(2, "0");
-    })
+  return Array.from(new Uint8Array(hash))
+    .map((x) => x.toString(16).padStart(2, "0"))
     .join("");
 }
 
-async function hashPassword(password, saltHex) {
-  let salt;
+async function hashPassword(password, saltHex = null) {
+  const salt = saltHex
+    ? Uint8Array.from(
+        (saltHex.match(/../g) || []).map((x) => parseInt(x, 16))
+      )
+    : crypto.getRandomValues(new Uint8Array(16));
 
-  if (saltHex) {
-    const pieces = saltHex.match(/../g) || [];
-
-    salt = new Uint8Array(
-      pieces.map(function (x) {
-        return parseInt(x, 16);
-      })
-    );
-  } else {
-    salt = crypto.getRandomValues(new Uint8Array(16));
-  }
+  const encoder = new TextEncoder();
 
   const key = await crypto.subtle.importKey(
     "raw",
@@ -85,15 +76,11 @@ async function hashPassword(password, saltHex) {
   );
 
   const saltString = Array.from(salt)
-    .map(function (x) {
-      return x.toString(16).padStart(2, "0");
-    })
+    .map((x) => x.toString(16).padStart(2, "0"))
     .join("");
 
   const hashString = Array.from(new Uint8Array(bits))
-    .map(function (x) {
-      return x.toString(16).padStart(2, "0");
-    })
+    .map((x) => x.toString(16).padStart(2, "0"))
     .join("");
 
   return saltString + ":" + hashString;
@@ -108,22 +95,22 @@ async function verifyPassword(password, stored) {
   const salt = parts[0];
   const hash = parts[1];
 
-  const calculated = await hashPassword(password, salt);
+  const result = await hashPassword(password, salt);
 
-  return calculated === salt + ":" + hash;
+  return result === salt + ":" + hash;
 }
 
 function getCookie(request) {
-  const header = request.headers.get("Cookie") || "";
+  const cookies = request.headers.get("Cookie") || "";
 
-  const cookies = header.split(";");
+  const parts = cookies
+    .split(";")
+    .map((x) => x.trim());
 
-  for (const item of cookies) {
-    const trimmed = item.trim();
-
-    if (trimmed.startsWith(COOKIE + "=")) {
+  for (const part of parts) {
+    if (part.startsWith(COOKIE + "=")) {
       return decodeURIComponent(
-        trimmed.substring(COOKIE.length + 1)
+        part.substring(COOKIE.length + 1)
       );
     }
   }
@@ -131,7 +118,7 @@ function getCookie(request) {
   return null;
 }
 
-function makeCookie(token, maxAge) {
+function makeCookie(token, maxAge = SESSION_SECONDS) {
   return (
     COOKIE +
     "=" +
@@ -142,20 +129,80 @@ function makeCookie(token, maxAge) {
   );
 }
 
-async function ensureSessionsTable(env) {
-  await env.DB.prepare(
-    "CREATE TABLE IF NOT EXISTS sessions (" +
-      "id INTEGER PRIMARY KEY AUTOINCREMENT," +
-      "token_hash TEXT NOT NULL UNIQUE," +
-      "user_id INTEGER NOT NULL," +
-      "expires_at INTEGER NOT NULL" +
-    ")"
-  ).run();
+async function getTableColumns(env, table) {
+  const result = await env.DB
+    .prepare("PRAGMA table_info(" + table + ")")
+    .all();
 
-  await env.DB.prepare(
-    "CREATE INDEX IF NOT EXISTS idx_sessions_token " +
-    "ON sessions(token_hash)"
-  ).run();
+  return new Set(
+    (result.results || []).map((row) => row.name)
+  );
+}
+
+async function getDatabaseInfo(env) {
+  const usersColumns = await getTableColumns(env, "users");
+  const poemsColumns = await getTableColumns(env, "poems");
+
+  return {
+    users: usersColumns,
+    poems: poemsColumns,
+    hasAdmin: usersColumns.has("is_admin"),
+    hasRole: usersColumns.has("role"),
+    hasSessionToken: usersColumns.has("session_token")
+  };
+}
+
+async function ensureSessions(env) {
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_hash TEXT NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    )
+  `).run();
+
+  await env.DB.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_sessions_token
+    ON sessions(token_hash)
+  `).run();
+}
+
+async function createSession(userId, env) {
+  const token = randomHex(32);
+  const hash = await sha256(token);
+  const info = await getDatabaseInfo(env);
+  const now = Math.floor(Date.now() / 1000);
+  const expires = now + SESSION_SECONDS;
+
+  if (info.hasSessionToken) {
+    await env.DB
+      .prepare(
+        "UPDATE users SET session_token = ? WHERE id = ?"
+      )
+      .bind(hash, userId)
+      .run();
+
+    return token;
+  }
+
+  await ensureSessions(env);
+
+  await env.DB
+    .prepare(
+      "DELETE FROM sessions WHERE user_id = ? OR expires_at <= ?"
+    )
+    .bind(userId, now)
+    .run();
+
+  await env.DB
+    .prepare(
+      "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)"
+    )
+    .bind(hash, userId, expires)
+    .run();
+
+  return token;
 }
 
 async function getUser(request, env) {
@@ -165,18 +212,51 @@ async function getUser(request, env) {
     return null;
   }
 
-  await ensureSessionsTable(env);
-
+  const info = await getDatabaseInfo(env);
   const hash = await sha256(token);
-  const now = Math.floor(Date.now() / 1000);
 
-  const user = await env.DB.prepare(
-    "SELECT u.id, u.username, u.is_admin " +
-    "FROM sessions s " +
-    "JOIN users u ON u.id = s.user_id " +
-    "WHERE s.token_hash = ? AND s.expires_at > ?"
-  )
-    .bind(hash, now)
+  if (info.hasSessionToken) {
+    const adminColumn = info.hasAdmin
+      ? "is_admin"
+      : "role";
+
+    const user = await env.DB
+      .prepare(
+        "SELECT id, username, " +
+        adminColumn +
+        " FROM users WHERE session_token = ?"
+      )
+      .bind(hash)
+      .first();
+
+    if (!user) {
+      return null;
+    }
+
+    return {
+      id: user.id,
+      username: user.username,
+      is_admin: info.hasAdmin
+        ? Boolean(user.is_admin)
+        : user.role === "admin"
+    };
+  }
+
+  await ensureSessions(env);
+
+  const adminColumn = info.hasAdmin
+    ? "u.is_admin"
+    : "u.role";
+
+  const user = await env.DB
+    .prepare(
+      "SELECT u.id, u.username, " +
+      adminColumn +
+      " FROM sessions s " +
+      "JOIN users u ON u.id = s.user_id " +
+      "WHERE s.token_hash = ? AND s.expires_at > ?"
+    )
+    .bind(hash, Math.floor(Date.now() / 1000))
     .first();
 
   if (!user) {
@@ -186,31 +266,10 @@ async function getUser(request, env) {
   return {
     id: user.id,
     username: user.username,
-    is_admin: Boolean(user.is_admin)
+    is_admin: info.hasAdmin
+      ? Boolean(user.is_admin)
+      : user.role === "admin"
   };
-}
-
-async function createSession(userId, env) {
-  await ensureSessionsTable(env);
-
-  const token = randomHex(32);
-  const hash = await sha256(token);
-  const expires = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
-
-  await env.DB.prepare(
-    "DELETE FROM sessions WHERE user_id = ?"
-  )
-    .bind(userId)
-    .run();
-
-  await env.DB.prepare(
-    "INSERT INTO sessions(token_hash, user_id, expires_at) " +
-    "VALUES (?, ?, ?)"
-  )
-    .bind(hash, userId, expires)
-    .run();
-
-  return token;
 }
 
 async function deleteSession(request, env) {
@@ -220,34 +279,97 @@ async function deleteSession(request, env) {
     return;
   }
 
-  await ensureSessionsTable(env);
-
+  const info = await getDatabaseInfo(env);
   const hash = await sha256(token);
 
-  await env.DB.prepare(
-    "DELETE FROM sessions WHERE token_hash = ?"
-  )
+  if (info.hasSessionToken) {
+    await env.DB
+      .prepare(
+        "UPDATE users SET session_token = NULL WHERE session_token = ?"
+      )
+      .bind(hash)
+      .run();
+
+    return;
+  }
+
+  await ensureSessions(env);
+
+  await env.DB
+    .prepare(
+      "DELETE FROM sessions WHERE token_hash = ?"
+    )
     .bind(hash)
     .run();
 }
 
-async function requireUser(request, env) {
-  const user = await getUser(request, env);
+async function createUser(env, username, password) {
+  const info = await getDatabaseInfo(env);
 
-  if (!user) {
-    return null;
+  const existing = await env.DB
+    .prepare(
+      "SELECT id FROM users WHERE username = ? COLLATE NOCASE"
+    )
+    .bind(username)
+    .first();
+
+  if (existing) {
+    throw new Error("That username is already taken.");
   }
 
-  return user;
+  const count = await env.DB
+    .prepare("SELECT COUNT(*) AS count FROM users")
+    .first();
+
+  const firstUser =
+    Number(count && count.count ? count.count : 0) === 0;
+
+  const passwordHash =
+    await hashPassword(password);
+
+  let result;
+
+  if (info.hasAdmin) {
+    result = await env.DB
+      .prepare(
+        "INSERT INTO users(username,password_hash,is_admin) VALUES(?,?,?)"
+      )
+      .bind(
+        username,
+        passwordHash,
+        firstUser ? 1 : 0
+      )
+      .run();
+  } else if (info.hasRole) {
+    result = await env.DB
+      .prepare(
+        "INSERT INTO users(username,password_hash,role) VALUES(?,?,?)"
+      )
+      .bind(
+        username,
+        passwordHash,
+        firstUser ? "admin" : "user"
+      )
+      .run();
+  } else {
+    throw new Error(
+      "Your users table is missing the admin/role column."
+    );
+  }
+
+  return {
+    id: result.meta.last_row_id,
+    is_admin: firstUser
+  };
 }
 
 function appHTML() {
   return `<!DOCTYPE html>
 <html lang="en">
-
 <head>
+
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 
 <title>Lucidity — Poetry by Juan Pablo F.</title>
 
@@ -297,7 +419,7 @@ button {
 
 .top {
   border-bottom: 1px solid var(--line);
-  background: rgba(244,239,230,.94);
+  background: rgba(244,239,230,.9);
   backdrop-filter: blur(12px);
   position: sticky;
   top: 0;
@@ -333,8 +455,8 @@ button {
 }
 
 .pill {
-  color: var(--muted);
   font: 600 12px system-ui, sans-serif;
+  color: var(--muted);
 }
 
 .hero {
@@ -354,7 +476,7 @@ button {
 }
 
 .hero h1 {
-  font-size: clamp(52px, 8vw, 92px);
+  font-size: clamp(52px,8vw,92px);
   line-height: .88;
   margin: 0;
   letter-spacing: -3px;
@@ -368,7 +490,7 @@ button {
 }
 
 .credit {
-  margin-top: 20px;
+  margin-top: 18px;
   color: var(--muted);
   font: 12px system-ui, sans-serif;
 }
@@ -389,11 +511,6 @@ button {
   font-size: 20px;
   font-weight: 500;
   margin: 0;
-}
-
-.buttons {
-  display: flex;
-  gap: 9px;
 }
 
 button {
@@ -421,7 +538,7 @@ button.danger {
 
 .feed {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0,1fr));
+  grid-template-columns: repeat(2,minmax(0,1fr));
   gap: 18px;
   padding-bottom: 90px;
 }
@@ -430,14 +547,11 @@ button.danger {
   background: var(--card);
   border: 1px solid var(--line);
   padding: 28px;
+  border-radius: 3px;
   box-shadow: var(--shadow);
   min-height: 260px;
   display: flex;
   flex-direction: column;
-}
-
-.poem.admin {
-  border-top: 3px solid var(--accent);
 }
 
 .poemTitle {
@@ -474,11 +588,6 @@ button.danger {
   color: var(--muted);
 }
 
-.loading {
-  color: var(--muted);
-  font: 13px system-ui, sans-serif;
-}
-
 dialog {
   width: min(580px, calc(100% - 28px));
   border: 1px solid var(--line);
@@ -486,12 +595,10 @@ dialog {
   color: var(--ink);
   padding: 0;
   border-radius: 4px;
-  box-shadow: 0 30px 100px rgba(0,0,0,.25);
 }
 
 dialog::backdrop {
   background: rgba(25,20,15,.5);
-  backdrop-filter: blur(3px);
 }
 
 .modal {
@@ -574,16 +681,20 @@ textarea {
   border-radius: 999px;
   font: 13px system-ui, sans-serif;
   opacity: 0;
-  pointer-events: none;
   transition: .2s;
-  z-index: 50;
 }
 
 .toast.show {
   opacity: 1;
 }
 
-@media (max-width: 760px) {
+.loading {
+  color: var(--muted);
+  font: 13px system-ui, sans-serif;
+  padding: 20px 0;
+}
+
+@media (max-width:760px) {
 
   .hero {
     grid-template-columns: 1fr;
@@ -593,6 +704,10 @@ textarea {
 
   .feed {
     grid-template-columns: 1fr;
+  }
+
+  .nav {
+    height: 64px;
   }
 
   .pill {
@@ -627,9 +742,8 @@ Lucidity
 <span class="pill" id="who"></span>
 
 <button
-class="secondary"
-id="authButton"
-type="button"
+  class="secondary"
+  id="authButton"
 >
 Log in
 </button>
@@ -674,22 +788,15 @@ to exist somewhere outside their heads.
 
 <h2>Recent poems</h2>
 
-<div class="buttons">
-
-<button
-id="newButton"
-type="button"
->
+<button id="newButton">
 Write a poem
 </button>
-
-</div>
 
 </section>
 
 <section
-id="feed"
-class="feed"
+  id="feed"
+  class="feed"
 >
 
 <div class="loading">
@@ -700,7 +807,10 @@ Loading poems...
 
 </main>
 
-<div id="toast" class="toast"></div>
+<div
+  id="toast"
+  class="toast"
+></div>
 
 <dialog id="authDialog">
 
@@ -711,8 +821,8 @@ Log in
 </h2>
 
 <div
-class="sub"
-id="authSub"
+  class="sub"
+  id="authSub"
 >
 Return to your writing.
 </div>
@@ -724,11 +834,11 @@ Username
 </label>
 
 <input
-id="username"
-autocomplete="username"
-required
-minlength="3"
-maxlength="30"
+  id="username"
+  autocomplete="username"
+  required
+  minlength="3"
+  maxlength="30"
 >
 
 <label>
@@ -736,32 +846,29 @@ Password
 </label>
 
 <input
-id="password"
-type="password"
-autocomplete="current-password"
-required
-minlength="8"
+  id="password"
+  type="password"
+  autocomplete="current-password"
+  required
+  minlength="8"
 >
 
 <div
-id="authError"
-class="error"
+  id="authError"
+  class="error"
 ></div>
 
 <div class="formActions">
 
 <button
-type="button"
-class="secondary"
-id="authCancel"
+  type="button"
+  class="secondary"
+  id="authCancel"
 >
 Cancel
 </button>
 
-<button
-type="submit"
-id="authSubmit"
->
+<button id="authSubmit">
 Log in
 </button>
 
@@ -804,9 +911,9 @@ Title
 </label>
 
 <input
-id="poemTitle"
-maxlength="120"
-required
+  id="poemTitle"
+  maxlength="120"
+  required
 >
 
 <label>
@@ -814,30 +921,27 @@ Your poem
 </label>
 
 <textarea
-id="poemBody"
-maxlength="20000"
-required
+  id="poemBody"
+  maxlength="20000"
+  required
 ></textarea>
 
 <div
-id="poemError"
-class="error"
+  id="poemError"
+  class="error"
 ></div>
 
 <div class="formActions">
 
 <button
-type="button"
-class="secondary"
-id="poemCancel"
+  type="button"
+  class="secondary"
+  id="poemCancel"
 >
 Cancel
 </button>
 
-<button
-type="submit"
-id="poemSubmit"
->
+<button id="poemSubmit">
 Publish poem
 </button>
 
@@ -851,530 +955,561 @@ Publish poem
 
 <script>
 
-(function () {
+(function() {
 
-"use strict";
-
-const state = {
-  user: null,
-  editingId: null,
-  authMode: "login"
-};
-
-function $(id) {
-  return document.getElementById(id);
-}
-
-function escapeHTML(value) {
-  return String(value ?? "").replace(/[&<>"']/g, function (c) {
-    return {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;"
-    }[c];
-  });
-}
-
-async function api(url, options) {
-
-  const opts = options || {};
-
-  const headers = {
-    "content-type": "application/json"
+  const state = {
+    user: null,
+    editingId: null,
+    authMode: "login"
   };
 
-  if (opts.headers) {
-    Object.assign(headers, opts.headers);
-  }
+  const $ = (id) => {
+    return document.getElementById(id);
+  };
 
-  const response = await fetch(url, {
-    ...opts,
-    headers: headers
-  });
+  function escapeHTML(value) {
 
-  let data = {};
+    return String(value || "").replace(
+      /[&<>"']/g,
+      function(character) {
 
-  try {
-    data = await response.json();
-  } catch (error) {
-    data = {};
-  }
+        const characters = {
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;"
+        };
 
-  if (!response.ok) {
-    throw new Error(
-      data.error ||
-      ("Request failed (" + response.status + ")")
+        return characters[character];
+      }
     );
   }
 
-  return data;
-}
+  async function api(url, options) {
 
-function toast(message) {
+    const settings = options || {};
 
-  const element = $("toast");
+    const headers = {
+      "content-type": "application/json"
+    };
 
-  element.textContent = message;
-  element.classList.add("show");
+    const response = await fetch(
+      url,
+      {
+        ...settings,
+        headers: {
+          ...headers,
+          ...(settings.headers || {})
+        }
+      }
+    );
 
-  clearTimeout(toast.timer);
+    let data = {};
 
-  toast.timer = setTimeout(function () {
-    element.classList.remove("show");
-  }, 2500);
-}
-
-function openAuth(mode) {
-
-  state.authMode = mode || "login";
-
-  renderAuth();
-
-  $("authDialog").showModal();
-
-  setTimeout(function () {
-    $("username").focus();
-  }, 50);
-}
-
-function renderAuth() {
-
-  const register = state.authMode === "register";
-
-  $("authHeading").textContent =
-    register ? "Create an account" : "Log in";
-
-  $("authSub").textContent =
-    register
-      ? "Create a place for your words."
-      : "Return to your writing.";
-
-  $("authSubmit").textContent =
-    register ? "Create account" : "Log in";
-
-  $("switchLabel").textContent =
-    register
-      ? "Already have an account?"
-      : "New here?";
-
-  $("switchAuth").textContent =
-    register
-      ? "Log in"
-      : "Create an account";
-
-  $("authError").textContent = "";
-}
-
-function openNewPoem() {
-
-  if (!state.user) {
-    openAuth("login");
-    return;
-  }
-
-  state.editingId = null;
-
-  $("poemHeading").textContent = "Write a poem";
-  $("poemSubmit").textContent = "Publish poem";
-
-  $("poemTitle").value = "";
-  $("poemBody").value = "";
-  $("poemError").textContent = "";
-
-  $("poemDialog").showModal();
-}
-
-function openEdit(id, title, body) {
-
-  state.editingId = id;
-
-  $("poemHeading").textContent = "Edit poem";
-  $("poemSubmit").textContent = "Save changes";
-
-  $("poemTitle").value = title;
-  $("poemBody").value = body;
-  $("poemError").textContent = "";
-
-  $("poemDialog").showModal();
-}
-
-async function refreshUser() {
-
-  const data = await api("/api/me");
-
-  state.user = data.user;
-
-  if (state.user) {
-
-    $("who").textContent =
-      "@" +
-      state.user.username +
-      (state.user.is_admin ? " · ADMIN" : "");
-
-    $("authButton").textContent = "Log out";
-
-  } else {
-
-    $("who").textContent = "";
-    $("authButton").textContent = "Log in";
-  }
-}
-
-async function loadPoems() {
-
-  const data = await api("/api/poems");
-
-  const feed = $("feed");
-
-  if (!data.poems || data.poems.length === 0) {
-
-    feed.innerHTML =
-      '<div class="empty">' +
-      "No poems yet.<br><br>" +
-      "Be the first person to leave a few words here." +
-      "</div>";
-
-    return;
-  }
-
-  feed.innerHTML = data.poems.map(function (poem) {
-
-    const canModify =
-      state.user &&
-      (
-        state.user.is_admin ||
-        Number(state.user.id) === Number(poem.user_id)
-      );
-
-    const adminClass =
-      state.user && state.user.is_admin
-        ? "admin"
-        : "";
-
-    let actions = "";
-
-    if (canModify) {
-
-      actions =
-        '<div class="actions">' +
-
-        '<button ' +
-        'type="button" ' +
-        'class="secondary edit" ' +
-        'data-id="' + poem.id + '">' +
-        "Edit" +
-        "</button>" +
-
-        '<button ' +
-        'type="button" ' +
-        'class="danger delete" ' +
-        'data-id="' + poem.id + '">' +
-        "Delete" +
-        "</button>" +
-
-        "</div>";
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = {};
     }
 
-    return (
-      '<article class="poem ' +
-      adminClass +
-      '">' +
+    if (!response.ok) {
+      throw new Error(
+        data.error ||
+        ("Request failed (" + response.status + ")")
+      );
+    }
 
-      '<h3 class="poemTitle">' +
-      escapeHTML(poem.title) +
-      "</h3>" +
+    return data;
+  }
 
-      '<div class="meta">' +
-      "by @" +
-      escapeHTML(poem.username) +
-      " · " +
-      escapeHTML(
-        poem.updated_at ||
-        poem.created_at ||
-        ""
-      ) +
-      "</div>" +
+  function showToast(message) {
 
-      '<div class="poemBody">' +
-      escapeHTML(poem.body) +
-      "</div>" +
+    const toast = $("toast");
 
-      actions +
+    toast.textContent = message;
+    toast.classList.add("show");
 
-      "</article>"
+    clearTimeout(showToast.timer);
+
+    showToast.timer = setTimeout(
+      function() {
+        toast.classList.remove("show");
+      },
+      2500
     );
+  }
 
-  }).join("");
+  function openAuth(mode) {
 
-  feed
-    .querySelectorAll(".edit")
-    .forEach(function (button) {
+    state.authMode = mode || "login";
 
-      button.addEventListener(
-        "click",
-        async function () {
+    renderAuth();
 
-          const id = Number(button.dataset.id);
+    $("authDialog").showModal();
 
-          const data = await api(
-            "/api/poems/" + id
-          );
+    setTimeout(
+      function() {
+        $("username").focus();
+      },
+      50
+    );
+  }
 
-          if (data.poem) {
+  function renderAuth() {
 
-            openEdit(
-              data.poem.id,
-              data.poem.title,
-              data.poem.body
-            );
+    const registering =
+      state.authMode === "register";
 
-          }
+    $("authHeading").textContent =
+      registering
+        ? "Create an account"
+        : "Log in";
 
-        }
-      );
+    $("authSub").textContent =
+      registering
+        ? "Create a place for your words."
+        : "Return to your writing.";
 
-    });
+    $("authSubmit").textContent =
+      registering
+        ? "Create account"
+        : "Log in";
 
-  feed
-    .querySelectorAll(".delete")
-    .forEach(function (button) {
+    $("switchLabel").textContent =
+      registering
+        ? "Already have an account?"
+        : "New here?";
 
-      button.addEventListener(
-        "click",
-        async function () {
+    $("switchAuth").textContent =
+      registering
+        ? "Log in"
+        : "Create an account";
 
-          if (
-            !confirm(
-              "Delete this poem? This cannot be undone."
-            )
-          ) {
-            return;
-          }
+    $("authError").textContent = "";
+  }
 
-          try {
+  async function refreshUser() {
 
-            await api(
-              "/api/poems/" +
-              button.dataset.id,
-              {
-                method: "DELETE"
-              }
-            );
+    const data = await api("/api/me");
 
-            toast("Poem deleted.");
+    state.user = data.user || null;
 
-            await loadPoems();
+    if (state.user) {
 
-          } catch (error) {
+      $("who").textContent =
+        "@" +
+        state.user.username +
+        (
+          state.user.is_admin
+            ? " · ADMIN"
+            : ""
+        );
 
-            toast(error.message);
-          }
+      $("authButton").textContent =
+        "Log out";
 
-        }
-      );
+    } else {
 
-    });
-}
+      $("who").textContent = "";
 
-$("authButton").addEventListener(
-  "click",
-  async function () {
+      $("authButton").textContent =
+        "Log in";
+    }
+  }
+
+  function openNewPoem() {
 
     if (!state.user) {
-
       openAuth("login");
       return;
     }
 
-    try {
+    state.editingId = null;
 
-      await api(
-        "/api/logout",
-        {
-          method: "POST"
-        }
-      );
+    $("poemHeading").textContent =
+      "Write a poem";
 
-      state.user = null;
+    $("poemSubmit").textContent =
+      "Publish poem";
 
-      await refreshUser();
-      await loadPoems();
-
-      toast("Logged out.");
-
-    } catch (error) {
-
-      toast(error.message);
-    }
-  }
-);
-
-$("newButton").addEventListener(
-  "click",
-  openNewPoem
-);
-
-$("authCancel").addEventListener(
-  "click",
-  function () {
-    $("authDialog").close();
-  }
-);
-
-$("poemCancel").addEventListener(
-  "click",
-  function () {
-    $("poemDialog").close();
-  }
-);
-
-$("switchAuth").addEventListener(
-  "click",
-  function () {
-
-    state.authMode =
-      state.authMode === "login"
-        ? "register"
-        : "login";
-
-    renderAuth();
-  }
-);
-
-$("authForm").addEventListener(
-  "submit",
-  async function (event) {
-
-    event.preventDefault();
-
-    $("authError").textContent = "";
-
-    const username =
-      $("username").value.trim();
-
-    const password =
-      $("password").value;
-
-    try {
-
-      await api(
-        "/api/" + state.authMode,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            username: username,
-            password: password
-          })
-        }
-      );
-
-      $("authDialog").close();
-
-      $("authForm").reset();
-
-      await refreshUser();
-      await loadPoems();
-
-      toast(
-        state.authMode === "register"
-          ? "Account created."
-          : "Welcome back."
-      );
-
-    } catch (error) {
-
-      $("authError").textContent =
-        error.message;
-    }
-  }
-);
-
-$("poemForm").addEventListener(
-  "submit",
-  async function (event) {
-
-    event.preventDefault();
-
+    $("poemTitle").value = "";
+    $("poemBody").value = "";
     $("poemError").textContent = "";
 
-    const title =
-      $("poemTitle").value.trim();
+    $("poemDialog").showModal();
+  }
 
-    const body =
-      $("poemBody").value;
+  function openEditPoem(id, title, body) {
 
-    try {
+    state.editingId = id;
 
-      if (state.editingId) {
+    $("poemHeading").textContent =
+      "Edit poem";
+
+    $("poemSubmit").textContent =
+      "Save changes";
+
+    $("poemTitle").value = title;
+    $("poemBody").value = body;
+    $("poemError").textContent = "";
+
+    $("poemDialog").showModal();
+  }
+
+  async function loadPoems() {
+
+    const data = await api("/api/poems");
+
+    const feed = $("feed");
+
+    if (!data.poems || data.poems.length === 0) {
+
+      feed.innerHTML = `
+        <div class="empty">
+          No poems yet.<br><br>
+          Be the first person to leave a few words here.
+        </div>
+      `;
+
+      return;
+    }
+
+    feed.innerHTML = data.poems
+      .map(function(poem) {
+
+        const canModify =
+          state.user &&
+          (
+            state.user.is_admin ||
+            Number(state.user.id) ===
+            Number(poem.user_id)
+          );
+
+        let actions = "";
+
+        if (canModify) {
+
+          actions = `
+            <div class="actions">
+
+              <button
+                class="secondary edit"
+                data-id="${poem.id}"
+              >
+                Edit
+              </button>
+
+              <button
+                class="danger delete"
+                data-id="${poem.id}"
+              >
+                Delete
+              </button>
+
+            </div>
+          `;
+        }
+
+        return `
+          <article class="poem">
+
+            <h3 class="poemTitle">
+              ${escapeHTML(poem.title)}
+            </h3>
+
+            <div class="meta">
+              by @${escapeHTML(poem.username)}
+              ·
+              ${escapeHTML(
+                poem.updated_at ||
+                poem.created_at ||
+                ""
+              )}
+            </div>
+
+            <div class="poemBody">
+              ${escapeHTML(poem.body)}
+            </div>
+
+            ${actions}
+
+          </article>
+        `;
+      })
+      .join("");
+
+    feed
+      .querySelectorAll(".edit")
+      .forEach(function(button) {
+
+        button.addEventListener(
+          "click",
+          async function() {
+
+            const id =
+              Number(button.dataset.id);
+
+            try {
+
+              const data =
+                await api(
+                  "/api/poems/" + id
+                );
+
+              openEditPoem(
+                id,
+                data.poem.title,
+                data.poem.body
+              );
+
+            } catch (error) {
+
+              showToast(error.message);
+            }
+          }
+        );
+      });
+
+    feed
+      .querySelectorAll(".delete")
+      .forEach(function(button) {
+
+        button.addEventListener(
+          "click",
+          async function() {
+
+            if (
+              !confirm(
+                "Delete this poem? This cannot be undone."
+              )
+            ) {
+              return;
+            }
+
+            try {
+
+              await api(
+                "/api/poems/" +
+                button.dataset.id,
+                {
+                  method: "DELETE"
+                }
+              );
+
+              showToast("Poem deleted.");
+
+              await loadPoems();
+
+            } catch (error) {
+
+              showToast(error.message);
+            }
+          }
+        );
+      });
+  }
+
+  $("authButton").addEventListener(
+    "click",
+    async function() {
+
+      if (!state.user) {
+
+        openAuth("login");
+
+        return;
+      }
+
+      try {
 
         await api(
-          "/api/poems/" +
-          state.editingId,
+          "/api/logout",
           {
-            method: "PUT",
-            body: JSON.stringify({
-              title: title,
-              body: body
-            })
+            method: "POST"
           }
         );
 
-        toast("Poem updated.");
+        state.user = null;
 
-      } else {
+        await refreshUser();
+        await loadPoems();
+
+        showToast("Logged out.");
+
+      } catch (error) {
+
+        showToast(error.message);
+      }
+    }
+  );
+
+  $("newButton").addEventListener(
+    "click",
+    openNewPoem
+  );
+
+  $("authCancel").addEventListener(
+    "click",
+    function() {
+      $("authDialog").close();
+    }
+  );
+
+  $("poemCancel").addEventListener(
+    "click",
+    function() {
+      $("poemDialog").close();
+    }
+  );
+
+  $("switchAuth").addEventListener(
+    "click",
+    function() {
+
+      state.authMode =
+        state.authMode === "login"
+          ? "register"
+          : "login";
+
+      renderAuth();
+    }
+  );
+
+  $("authForm").addEventListener(
+    "submit",
+    async function(event) {
+
+      event.preventDefault();
+
+      $("authError").textContent = "";
+
+      const username =
+        $("username").value.trim();
+
+      const password =
+        $("password").value;
+
+      try {
 
         await api(
-          "/api/poems",
+          "/api/" + state.authMode,
           {
             method: "POST",
             body: JSON.stringify({
-              title: title,
-              body: body
+              username: username,
+              password: password
             })
           }
         );
 
-        toast("Poem published.");
+        $("authDialog").close();
+
+        $("authForm").reset();
+
+        await refreshUser();
+        await loadPoems();
+
+        showToast(
+          state.authMode === "register"
+            ? "Account created."
+            : "Welcome back."
+        );
+
+      } catch (error) {
+
+        $("authError").textContent =
+          error.message;
       }
+    }
+  );
 
-      $("poemDialog").close();
+  $("poemForm").addEventListener(
+    "submit",
+    async function(event) {
 
-      state.editingId = null;
+      event.preventDefault();
 
+      $("poemError").textContent = "";
+
+      const title =
+        $("poemTitle").value.trim();
+
+      const body =
+        $("poemBody").value;
+
+      try {
+
+        if (state.editingId) {
+
+          await api(
+            "/api/poems/" +
+            state.editingId,
+            {
+              method: "PUT",
+              body: JSON.stringify({
+                title: title,
+                body: body
+              })
+            }
+          );
+
+          showToast("Poem updated.");
+
+        } else {
+
+          await api(
+            "/api/poems",
+            {
+              method: "POST",
+              body: JSON.stringify({
+                title: title,
+                body: body
+              })
+            }
+          );
+
+          showToast("Poem published.");
+        }
+
+        $("poemDialog").close();
+
+        state.editingId = null;
+
+        await loadPoems();
+
+      } catch (error) {
+
+        $("poemError").textContent =
+          error.message;
+      }
+    }
+  );
+
+  async function start() {
+
+    try {
+
+      await refreshUser();
       await loadPoems();
 
     } catch (error) {
 
-      $("poemError").textContent =
-        error.message;
+      console.error(error);
+
+      $("feed").innerHTML = `
+        <div class="empty">
+          The site could not load its data.
+          <br><br>
+          <small>
+            ${escapeHTML(error.message)}
+          </small>
+        </div>
+      `;
     }
   }
-);
 
-async function start() {
-
-  try {
-
-    await refreshUser();
-    await loadPoems();
-
-  } catch (error) {
-
-    console.error(error);
-
-    $("feed").innerHTML =
-      '<div class="empty">' +
-      "The site could not load its data.<br><br>" +
-      "<small>" +
-      escapeHTML(error.message) +
-      "</small>" +
-      "</div>";
-  }
-}
-
-start();
+  start();
 
 })();
 
@@ -1400,11 +1535,11 @@ export default {
         return new Response(
           appHTML(),
           {
-            status: 200,
             headers: {
               "content-type":
                 "text/html; charset=UTF-8",
-              "cache-control": "no-store"
+              "cache-control":
+                "no-store"
             }
           }
         );
@@ -1416,7 +1551,10 @@ export default {
       ) {
 
         return json({
-          user: await getUser(request, env)
+          user: await getUser(
+            request,
+            env
+          )
         });
       }
 
@@ -1428,30 +1566,41 @@ export default {
         let body;
 
         try {
-          body = await request.json();
+
+          body =
+            await request.json();
+
         } catch (error) {
+
           return json(
             {
-              error: "Invalid request."
+              error:
+                "Invalid request."
             },
             400
           );
         }
 
         const username =
-          String(body.username || "").trim();
+          String(
+            body.username || ""
+          ).trim();
 
         const password =
-          String(body.password || "");
+          String(
+            body.password || ""
+          );
 
         if (
-          !/^[A-Za-z0-9_]{3,30}$/.test(username)
+          !/^[A-Za-z0-9_]{3,30}$/.test(
+            username
+          )
         ) {
 
           return json(
             {
               error:
-                "Username must be 3-30 characters using letters, numbers, or underscores."
+                "Username must be 3–30 characters using letters, numbers, or underscores."
             },
             400
           );
@@ -1468,63 +1617,32 @@ export default {
           );
         }
 
-        const existing = await env.DB.prepare(
-          "SELECT id FROM users " +
-          "WHERE username = ? COLLATE NOCASE"
-        )
-          .bind(username)
-          .first();
-
-        if (existing) {
-
-          return json(
-            {
-              error:
-                "That username is already taken."
-            },
-            409
-          );
-        }
-
-        const count = await env.DB.prepare(
-          "SELECT COUNT(*) AS count FROM users"
-        ).first();
-
-        const isAdmin =
-          Number(count.count || 0) === 0;
-
-        const passwordHash =
-          await hashPassword(password);
-
-        const result = await env.DB.prepare(
-          "INSERT INTO users " +
-          "(username, password_hash, is_admin) " +
-          "VALUES (?, ?, ?)"
-        )
-          .bind(
+        const user =
+          await createUser(
+            env,
             username,
-            passwordHash,
-            isAdmin ? 1 : 0
-          )
-          .run();
+            password
+          );
 
         const session =
           await createSession(
-            result.meta.last_row_id,
+            user.id,
             env
           );
 
         return json(
           {
-            ok: true
+            ok: true,
+            user: {
+              id: user.id,
+              username: username,
+              is_admin: user.is_admin
+            }
           },
           200,
           {
             "set-cookie":
-              makeCookie(
-                session,
-                SESSION_SECONDS
-              )
+              makeCookie(session)
           }
         );
       }
@@ -1537,29 +1655,49 @@ export default {
         let body;
 
         try {
-          body = await request.json();
+
+          body =
+            await request.json();
+
         } catch (error) {
+
           return json(
             {
-              error: "Invalid request."
+              error:
+                "Invalid request."
             },
             400
           );
         }
 
         const username =
-          String(body.username || "").trim();
+          String(
+            body.username || ""
+          ).trim();
 
         const password =
-          String(body.password || "");
+          String(
+            body.password || ""
+          );
 
-        const user = await env.DB.prepare(
-          "SELECT id, username, password_hash, is_admin " +
-          "FROM users " +
-          "WHERE username = ? COLLATE NOCASE"
-        )
-          .bind(username)
-          .first();
+        const info =
+          await getDatabaseInfo(env);
+
+        const adminColumn =
+          info.hasAdmin
+            ? "is_admin"
+            : "role";
+
+        const user =
+          await env.DB
+            .prepare(
+              "SELECT id, username, password_hash, " +
+              adminColumn +
+              " FROM users " +
+              "WHERE username = ? COLLATE NOCASE"
+            )
+            .bind(username)
+            .first();
 
         if (
           !user ||
@@ -1591,10 +1729,7 @@ export default {
           200,
           {
             "set-cookie":
-              makeCookie(
-                session,
-                SESSION_SECONDS
-              )
+              makeCookie(session)
           }
         );
       }
@@ -1626,67 +1761,25 @@ export default {
         url.pathname === "/api/poems"
       ) {
 
-        const result = await env.DB.prepare(
-          "SELECT " +
-          "p.id, " +
-          "p.user_id, " +
-          "p.title, " +
-          "p.body, " +
-          "p.created_at, " +
-          "p.updated_at, " +
-          "u.username " +
-          "FROM poems p " +
-          "JOIN users u ON u.id = p.user_id " +
-          "ORDER BY p.updated_at DESC, p.id DESC"
-        ).all();
+        const result =
+          await env.DB
+            .prepare(
+              "SELECT " +
+              "p.id, " +
+              "p.user_id, " +
+              "p.title, " +
+              "p.body, " +
+              "p.created_at, " +
+              "p.updated_at, " +
+              "u.username " +
+              "FROM poems p " +
+              "JOIN users u ON u.id = p.user_id " +
+              "ORDER BY p.updated_at DESC, p.id DESC"
+            )
+            .all();
 
         return json({
           poems: result.results || []
-        });
-      }
-
-      const poemMatch =
-        url.pathname.match(
-          /^\/api\/poems\/(\d+)$/
-        );
-
-      if (
-        poemMatch &&
-        request.method === "GET"
-      ) {
-
-        const id =
-          Number(poemMatch[1]);
-
-        const poem =
-          await env.DB.prepare(
-            "SELECT " +
-            "p.id, " +
-            "p.user_id, " +
-            "p.title, " +
-            "p.body, " +
-            "p.created_at, " +
-            "p.updated_at, " +
-            "u.username " +
-            "FROM poems p " +
-            "JOIN users u ON u.id = p.user_id " +
-            "WHERE p.id = ?"
-          )
-            .bind(id)
-            .first();
-
-        if (!poem) {
-
-          return json(
-            {
-              error: "Poem not found."
-            },
-            404
-          );
-        }
-
-        return json({
-          poem: poem
         });
       }
 
@@ -1696,7 +1789,7 @@ export default {
       ) {
 
         const user =
-          await requireUser(
+          await getUser(
             request,
             env
           );
@@ -1715,23 +1808,32 @@ export default {
         let body;
 
         try {
-          body = await request.json();
+
+          body =
+            await request.json();
+
         } catch (error) {
+
           return json(
             {
-              error: "Invalid request."
+              error:
+                "Invalid request."
             },
             400
           );
         }
 
         const title =
-          String(body.title || "").trim();
+          String(
+            body.title || ""
+          ).trim();
 
-        const poemBody =
-          String(body.body || "");
+        const poem =
+          String(
+            body.body || ""
+          );
 
-        if (!title || !poemBody.trim()) {
+        if (!title || !poem.trim()) {
 
           return json(
             {
@@ -1744,7 +1846,7 @@ export default {
 
         if (
           title.length > 120 ||
-          poemBody.length > 20000
+          poem.length > 20000
         ) {
 
           return json(
@@ -1756,15 +1858,14 @@ export default {
           );
         }
 
-        await env.DB.prepare(
-          "INSERT INTO poems " +
-          "(user_id, title, body) " +
-          "VALUES (?, ?, ?)"
-        )
+        await env.DB
+          .prepare(
+            "INSERT INTO poems(user_id,title,body) VALUES(?,?,?)"
+          )
           .bind(
             user.id,
             title,
-            poemBody
+            poem
           )
           .run();
 
@@ -1773,16 +1874,52 @@ export default {
         });
       }
 
+      const poemMatch =
+        url.pathname.match(
+          /^\/api\/poems\/(\d+)$/
+        );
+
       if (
         poemMatch &&
         (
+          request.method === "GET" ||
           request.method === "PUT" ||
           request.method === "DELETE"
         )
       ) {
 
+        const id =
+          Number(poemMatch[1]);
+
+        if (request.method === "GET") {
+
+          const poem =
+            await env.DB
+              .prepare(
+                "SELECT id,user_id,title,body,created_at,updated_at " +
+                "FROM poems WHERE id = ?"
+              )
+              .bind(id)
+              .first();
+
+          if (!poem) {
+
+            return json(
+              {
+                error:
+                  "Poem not found."
+              },
+              404
+            );
+          }
+
+          return json({
+            poem: poem
+          });
+        }
+
         const user =
-          await requireUser(
+          await getUser(
             request,
             env
           );
@@ -1798,21 +1935,20 @@ export default {
           );
         }
 
-        const id =
-          Number(poemMatch[1]);
-
-        const poem =
-          await env.DB.prepare(
-            "SELECT * FROM poems WHERE id = ?"
-          )
+        const existing =
+          await env.DB
+            .prepare(
+              "SELECT id,user_id FROM poems WHERE id = ?"
+            )
             .bind(id)
             .first();
 
-        if (!poem) {
+        if (!existing) {
 
           return json(
             {
-              error: "Poem not found."
+              error:
+                "Poem not found."
             },
             404
           );
@@ -1820,7 +1956,8 @@ export default {
 
         if (
           !user.is_admin &&
-          Number(poem.user_id) !== Number(user.id)
+          Number(existing.user_id) !==
+          Number(user.id)
         ) {
 
           return json(
@@ -1836,9 +1973,10 @@ export default {
           request.method === "DELETE"
         ) {
 
-          await env.DB.prepare(
-            "DELETE FROM poems WHERE id = ?"
-          )
+          await env.DB
+            .prepare(
+              "DELETE FROM poems WHERE id = ?"
+            )
             .bind(id)
             .run();
 
@@ -1850,23 +1988,32 @@ export default {
         let body;
 
         try {
-          body = await request.json();
+
+          body =
+            await request.json();
+
         } catch (error) {
+
           return json(
             {
-              error: "Invalid request."
+              error:
+                "Invalid request."
             },
             400
           );
         }
 
         const title =
-          String(body.title || "").trim();
+          String(
+            body.title || ""
+          ).trim();
 
-        const poemBody =
-          String(body.body || "");
+        const poem =
+          String(
+            body.body || ""
+          );
 
-        if (!title || !poemBody.trim()) {
+        if (!title || !poem.trim()) {
 
           return json(
             {
@@ -1879,7 +2026,7 @@ export default {
 
         if (
           title.length > 120 ||
-          poemBody.length > 20000
+          poem.length > 20000
         ) {
 
           return json(
@@ -1891,16 +2038,15 @@ export default {
           );
         }
 
-        await env.DB.prepare(
-          "UPDATE poems " +
-          "SET title = ?, " +
-          "body = ?, " +
-          "updated_at = CURRENT_TIMESTAMP " +
-          "WHERE id = ?"
-        )
+        await env.DB
+          .prepare(
+            "UPDATE poems " +
+            "SET title = ?, body = ?, updated_at = CURRENT_TIMESTAMP " +
+            "WHERE id = ?"
+          )
           .bind(
             title,
-            poemBody,
+            poem,
             id
           )
           .run();
