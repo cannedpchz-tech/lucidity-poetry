@@ -1592,4 +1592,400 @@ export default {
 
         const columns =
           info.hasAdminColumn
+                  ? "id, username, is_admin"
+          : "id, username, role";
+
+        const user = await env.DB
+          .prepare(
+            `SELECT ${columns}
+             FROM users
+             WHERE username = ? COLLATE NOCASE`
+          )
+          .bind(username)
+          .first();
+
+        if (
+          !user ||
+          !(await verifyPassword(
+            password,
+            user.password_hash
+          ))
+        ) {
+          return json(
+            {
+              error:
+                "Incorrect username or password."
+            },
+            401
+          );
+        }
+
+        const session =
+          await createSession(
+            user.id,
+            env
+          );
+
+        return json(
+          {
+            ok: true,
+            user: {
+              id: user.id,
+              username: user.username,
+              is_admin: info.hasAdminColumn
+                ? !!user.is_admin
+                : user.role === "admin"
+            }
+          },
+          200,
+          {
+            "set-cookie":
+              makeCookie(session)
+          }
+        );
+      }
+
+      /*
+       * LOGOUT
+       */
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/logout"
+      ) {
+
+        try {
+          await deleteSession(
+            request,
+            env
+          );
+        } catch (error) {
+          console.error(
+            "LOGOUT ERROR:",
+            error
+          );
+        }
+
+        return json(
+          { ok: true },
+          200,
+          {
+            "set-cookie":
+              makeCookie("", 0)
+          }
+        );
+      }
+
+      /*
+       * GET POEMS
+       */
+
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/poems"
+      ) {
+
+        const result =
+          await env.DB
+            .prepare(`
+              SELECT
+                p.id,
+                p.user_id,
+                p.title,
+                p.body,
+                p.created_at,
+                p.updated_at,
+                u.username
+              FROM poems p
+              JOIN users u
+                ON u.id = p.user_id
+              ORDER BY
+                p.updated_at DESC,
+                p.id DESC
+            `)
+            .all();
+
+        return json({
+          poems: result.results || []
+        });
+      }
+
+      /*
+       * CREATE POEM
+       */
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/poems"
+      ) {
+
+        const user =
+          await getUser(
+            request,
+            env
+          );
+
+        if (!user) {
+          return json(
+            {
+              error:
+                "You must be logged in."
+            },
+            401
+          );
+        }
+
+        let body;
+
+        try {
+          body = await request.json();
+        } catch {
+          return json(
+            {
+              error:
+                "Invalid request."
+            },
+            400
+          );
+        }
+
+        const title =
+          String(body.title || "").trim();
+
+        const poemBody =
+          String(body.body || "");
+
+        if (!title || !poemBody.trim()) {
+          return json(
+            {
+              error:
+                "Title and poem text are required."
+            },
+            400
+          );
+        }
+
+        if (
+          title.length > 120 ||
+          poemBody.length > 20000
+        ) {
+          return json(
+            {
+              error:
+                "Poem is too long."
+            },
+            400
+          );
+        }
+
+        await env.DB
+          .prepare(`
+            INSERT INTO poems(
+              user_id,
+              title,
+              body
+            )
+            VALUES (?, ?, ?)
+          `)
+          .bind(
+            user.id,
+            title,
+            poemBody
+          )
+          .run();
+
+        return json({
+          ok: true
+        });
+      }
+
+      /*
+       * EDIT / DELETE POEM
+       */
+
+      const poemMatch =
+        url.pathname.match(
+          /^\/api\/poems\/(\d+)$/
+        );
+
+      if (
+        poemMatch &&
+        (
+          request.method === "PUT" ||
+          request.method === "DELETE"
+        )
+      ) {
+
+        const user =
+          await getUser(
+            request,
+            env
+          );
+
+        if (!user) {
+          return json(
+            {
+              error:
+                "You must be logged in."
+            },
+            401
+          );
+        }
+
+        const poemId =
+          Number(poemMatch[1]);
+
+        const poem =
+          await env.DB
+            .prepare(
+              "SELECT * FROM poems WHERE id = ?"
+            )
+            .bind(poemId)
+            .first();
+
+        if (!poem) {
+          return json(
+            {
+              error:
+                "Poem not found."
+            },
+            404
+          );
+        }
+
+        if (
+          !user.is_admin &&
+          Number(poem.user_id) !==
+            Number(user.id)
+        ) {
+          return json(
+            {
+              error:
+                "You can only modify your own poems."
+            },
+            403
+          );
+        }
+
+        /*
+         * DELETE
+         */
+
+        if (
+          request.method === "DELETE"
+        ) {
+
+          await env.DB
+            .prepare(
+              "DELETE FROM poems WHERE id = ?"
+            )
+            .bind(poemId)
+            .run();
+
+          return json({
+            ok: true
+          });
+        }
+
+        /*
+         * EDIT
+         */
+
+        let body;
+
+        try {
+          body = await request.json();
+        } catch {
+          return json(
+            {
+              error:
+                "Invalid request."
+            },
+            400
+          );
+        }
+
+        const title =
+          String(body.title || "").trim();
+
+        const poemBody =
+          String(body.body || "");
+
+        if (!title || !poemBody.trim()) {
+          return json(
+            {
+              error:
+                "Title and poem text are required."
+            },
+            400
+          );
+        }
+
+        if (
+          title.length > 120 ||
+          poemBody.length > 20000
+        ) {
+          return json(
+            {
+              error:
+                "Poem is too long."
+            },
+            400
+          );
+        }
+
+        await env.DB
+          .prepare(`
+            UPDATE poems
+            SET
+              title = ?,
+              body = ?,
+              updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `)
+          .bind(
+            title,
+            poemBody,
+            poemId
+          )
+          .run();
+
+        return json({
+          ok: true
+        });
+      }
+
+      /*
+       * UNKNOWN ROUTE
+       */
+
+      return new Response(
+        "Not found",
+        {
+          status: 404,
+          headers: {
+            "content-type":
+              "text/plain; charset=UTF-8"
+          }
+        }
+      );
+
+    } catch (error) {
+
+      console.error(
+        "SERVER ERROR:",
+        error
+      );
+
+      return json(
+        {
+          error:
+            error?.message ||
+            "Server error."
+        },
+        500
+      );
+    }
+  }
+};
            
