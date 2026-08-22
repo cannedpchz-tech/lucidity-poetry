@@ -112,3 +112,4 @@ export default { async fetch(request, env) {
     return new Response('Not found',{status:404});
   } catch(error) { console.error(error); return json({error:'Server error.'},500); }
 } };
+
