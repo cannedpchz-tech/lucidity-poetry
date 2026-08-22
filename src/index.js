@@ -3,31 +3,20 @@ const encoder = new TextEncoder();
 const COOKIE = "lucidity_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 30;
 
-const json = (data, status = 200, headers = {}) => new Response(
-  JSON.stringify(data),
-  {
+const json = (data, status = 200, headers = {}) =>
+  new Response(JSON.stringify(data), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
       ...headers
     }
-  }
-);
-
-function htmlEscape(value = "") {
-  return String(value).replace(/[&<>"']/g, c => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    "\"": "&quot;",
-    "'": "&#39;"
-  }[c]));
-}
+  });
 
 function randomHex(bytes = 32) {
   const a = new Uint8Array(bytes);
   crypto.getRandomValues(a);
+
   return [...a]
     .map(x => x.toString(16).padStart(2, "0"))
     .join("");
@@ -35,7 +24,10 @@ function randomHex(bytes = 32) {
 
 async function sha256(value) {
   return [...new Uint8Array(
-    await crypto.subtle.digest("SHA-256", encoder.encode(value))
+    await crypto.subtle.digest(
+      "SHA-256",
+      encoder.encode(value)
+    )
   )]
     .map(x => x.toString(16).padStart(2, "0"))
     .join("");
@@ -43,8 +35,13 @@ async function sha256(value) {
 
 async function hashPassword(password, saltHex = null) {
   const salt = saltHex
-    ? Uint8Array.from((saltHex.match(/../g) || []).map(x => parseInt(x, 16)))
-    : crypto.getRandomValues(new Uint8Array(16));
+    ? Uint8Array.from(
+        (saltHex.match(/../g) || [])
+          .map(x => parseInt(x, 16))
+      )
+    : crypto.getRandomValues(
+        new Uint8Array(16)
+      );
 
   const key = await crypto.subtle.importKey(
     "raw",
@@ -66,7 +63,9 @@ async function hashPassword(password, saltHex = null) {
   );
 
   return (
-    [...salt].map(x => x.toString(16).padStart(2, "0")).join("") +
+    [...salt]
+      .map(x => x.toString(16).padStart(2, "0"))
+      .join("") +
     ":" +
     [...new Uint8Array(bits)]
       .map(x => x.toString(16).padStart(2, "0"))
@@ -75,70 +74,81 @@ async function hashPassword(password, saltHex = null) {
 }
 
 async function verifyPassword(password, stored) {
-  if (!stored || !stored.includes(":")) return false;
+  if (!stored || !stored.includes(":")) {
+    return false;
+  }
 
   const [salt, hash] = stored.split(":");
-  return (await hashPassword(password, salt)) === `${salt}:${hash}`;
+
+  return (
+    await hashPassword(password, salt)
+  ) === `${salt}:${hash}`;
 }
 
 function getCookie(request) {
-  const cookies = request.headers.get("Cookie") || "";
+  const cookies =
+    request.headers.get("Cookie") || "";
 
   const item = cookies
     .split(";")
     .map(x => x.trim())
-    .find(x => x.startsWith(COOKIE + "="));
+    .find(
+      x => x.startsWith(COOKIE + "=")
+    );
 
-  return item
-    ? decodeURIComponent(item.slice(COOKIE.length + 1))
-    : null;
+  if (!item) {
+    return null;
+  }
+
+  return decodeURIComponent(
+    item.slice(COOKIE.length + 1)
+  );
 }
 
-function makeCookie(token, maxAge = SESSION_SECONDS) {
+function makeCookie(
+  token,
+  maxAge = SESSION_SECONDS
+) {
   return `${COOKIE}=${encodeURIComponent(token)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
-
-/*
-  This supports the database structure already in your project.
-
-  It can work with either:
-  - is_admin
-  - role
-
-  And it can use either:
-  - session_token on users
-  - a sessions table
-
-  That means we don't need to delete or recreate your D1 database.
-*/
 
 let databaseInfoPromise = null;
 
 async function getDatabaseInfo(env) {
   if (!databaseInfoPromise) {
     databaseInfoPromise = (async () => {
-      const usersInfo = await env.DB
-        .prepare("PRAGMA table_info(users)")
-        .all();
 
-      const usersColumns = new Set(
-        (usersInfo.results || []).map(x => x.name)
-      );
+      const usersInfo =
+        await env.DB
+          .prepare("PRAGMA table_info(users)")
+          .all();
 
-      const poemsInfo = await env.DB
-        .prepare("PRAGMA table_info(poems)")
-        .all();
+      const usersColumns =
+        new Set(
+          (usersInfo.results || [])
+            .map(x => x.name)
+        );
 
-      const poemsColumns = new Set(
-        (poemsInfo.results || []).map(x => x.name)
-      );
+      const poemsInfo =
+        await env.DB
+          .prepare("PRAGMA table_info(poems)")
+          .all();
+
+      const poemsColumns =
+        new Set(
+          (poemsInfo.results || [])
+            .map(x => x.name)
+        );
 
       return {
         usersColumns,
         poemsColumns,
-        hasAdminColumn: usersColumns.has("is_admin"),
-        hasRoleColumn: usersColumns.has("role"),
-        hasSessionToken: usersColumns.has("session_token")
+        hasAdminColumn:
+          usersColumns.has("is_admin"),
+        hasRoleColumn:
+          usersColumns.has("role"),
+        hasSessionToken:
+          usersColumns.has("session_token")
       };
     })();
   }
@@ -146,102 +156,153 @@ async function getDatabaseInfo(env) {
   return databaseInfoPromise;
 }
 
-async function ensureSessionsTable(env, info) {
-  if (info.hasSessionToken) return;
+async function ensureSessionsTable(env) {
+  await env.DB
+    .prepare(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash TEXT NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      )
+    `)
+    .run();
 
-  await env.DB.prepare(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      token_hash TEXT NOT NULL UNIQUE,
-      user_id INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL
-    )
-  `).run();
-
-  await env.DB.prepare(`
-    CREATE INDEX IF NOT EXISTS idx_sessions_token
-    ON sessions(token_hash)
-  `).run();
+  await env.DB
+    .prepare(`
+      CREATE INDEX IF NOT EXISTS idx_sessions_token
+      ON sessions(token_hash)
+    `)
+    .run();
 }
 
 async function getUser(request, env) {
   const token = getCookie(request);
 
-  if (!token) return null;
+  if (!token) {
+    return null;
+  }
 
-  const info = await getDatabaseInfo(env);
+  const info =
+    await getDatabaseInfo(env);
+
+  const hash =
+    await sha256(token);
 
   if (info.hasSessionToken) {
-    const hash = await sha256(token);
 
-    const columns = info.hasAdminColumn
-      ? "id, username, is_admin"
-      : "id, username, role";
+    const adminColumn =
+      info.hasAdminColumn
+        ? "is_admin"
+        : null;
 
-    const user = await env.DB
-      .prepare(
-        `SELECT ${columns}
-         FROM users
-         WHERE session_token = ?`
-      )
-      .bind(hash)
-      .first();
+    const roleColumn =
+      info.hasRoleColumn
+        ? "role"
+        : null;
 
-    if (!user) return null;
+    const selectedColumns =
+      adminColumn
+        ? "id, username, is_admin"
+        : roleColumn
+          ? "id, username, role"
+          : "id, username";
+
+    const user =
+      await env.DB
+        .prepare(`
+          SELECT ${selectedColumns}
+          FROM users
+          WHERE session_token = ?
+        `)
+        .bind(hash)
+        .first();
+
+    if (!user) {
+      return null;
+    }
 
     return {
       id: user.id,
       username: user.username,
-      is_admin: info.hasAdminColumn
-        ? !!user.is_admin
-        : user.role === "admin"
+      is_admin:
+        adminColumn
+          ? !!user.is_admin
+          : roleColumn
+            ? user.role === "admin"
+            : false
     };
   }
 
-  await ensureSessionsTable(env, info);
+  await ensureSessionsTable(env);
 
-  const user = await env.DB
-    .prepare(`
-      SELECT
-        u.id,
-        u.username,
-        ${info.hasAdminColumn ? "u.is_admin" : "u.role"}
-      FROM sessions s
-      JOIN users u ON u.id = s.user_id
-      WHERE s.token_hash = ?
-        AND s.expires_at > ?
-    `)
-    .bind(
-      await sha256(token),
-      Math.floor(Date.now() / 1000)
-    )
-    .first();
+  const selectedAdmin =
+    info.hasAdminColumn
+      ? "u.is_admin"
+      : info.hasRoleColumn
+        ? "u.role"
+        : "0 AS is_admin";
 
-  if (!user) return null;
+  const user =
+    await env.DB
+      .prepare(`
+        SELECT
+          u.id,
+          u.username,
+          ${selectedAdmin}
+        FROM sessions s
+        JOIN users u
+          ON u.id = s.user_id
+        WHERE s.token_hash = ?
+          AND s.expires_at > ?
+      `)
+      .bind(
+        hash,
+        Math.floor(Date.now() / 1000)
+      )
+      .first();
+
+  if (!user) {
+    return null;
+  }
 
   return {
     id: user.id,
     username: user.username,
-    is_admin: info.hasAdminColumn
-      ? !!user.is_admin
-      : user.role === "admin"
+    is_admin:
+      info.hasAdminColumn
+        ? !!user.is_admin
+        : info.hasRoleColumn
+          ? user.role === "admin"
+          : false
   };
 }
 
 async function createSession(userId, env) {
-  const token = randomHex(32);
-  const info = await getDatabaseInfo(env);
+  const token =
+    randomHex(32);
+
+  const info =
+    await getDatabaseInfo(env);
 
   if (info.hasSessionToken) {
+
     await env.DB
-      .prepare("UPDATE users SET session_token = ? WHERE id = ?")
-      .bind(await sha256(token), userId)
+      .prepare(`
+        UPDATE users
+        SET session_token = ?
+        WHERE id = ?
+      `)
+      .bind(
+        await sha256(token),
+        userId
+      )
       .run();
 
     return token;
   }
 
-  await ensureSessionsTable(env, info);
+  await ensureSessionsTable(env);
 
   await env.DB
     .prepare(`
@@ -249,18 +310,26 @@ async function createSession(userId, env) {
       WHERE user_id = ?
          OR expires_at <= ?
     `)
-    .bind(userId, Math.floor(Date.now() / 1000))
+    .bind(
+      userId,
+      Math.floor(Date.now() / 1000)
+    )
     .run();
 
   await env.DB
     .prepare(`
-      INSERT INTO sessions(token_hash, user_id, expires_at)
+      INSERT INTO sessions(
+        token_hash,
+        user_id,
+        expires_at
+      )
       VALUES (?, ?, ?)
     `)
     .bind(
       await sha256(token),
       userId,
-      Math.floor(Date.now() / 1000) + SESSION_SECONDS
+      Math.floor(Date.now() / 1000) +
+        SESSION_SECONDS
     )
     .run();
 
@@ -268,80 +337,129 @@ async function createSession(userId, env) {
 }
 
 async function deleteSession(request, env) {
-  const token = getCookie(request);
+  const token =
+    getCookie(request);
 
-  if (!token) return;
+  if (!token) {
+    return;
+  }
 
-  const info = await getDatabaseInfo(env);
-  const hash = await sha256(token);
+  const info =
+    await getDatabaseInfo(env);
+
+  const hash =
+    await sha256(token);
 
   if (info.hasSessionToken) {
+
     await env.DB
-      .prepare("UPDATE users SET session_token = NULL WHERE session_token = ?")
+      .prepare(`
+        UPDATE users
+        SET session_token = NULL
+        WHERE session_token = ?
+      `)
       .bind(hash)
       .run();
 
     return;
   }
 
-  await ensureSessionsTable(env, info);
+  await ensureSessionsTable(env);
 
   await env.DB
-    .prepare("DELETE FROM sessions WHERE token_hash = ?")
+    .prepare(`
+      DELETE FROM sessions
+      WHERE token_hash = ?
+    `)
     .bind(hash)
     .run();
 }
 
-async function createUser(env, username, password) {
-  const info = await getDatabaseInfo(env);
+async function createUser(
+  env,
+  username,
+  password
+) {
+  const info =
+    await getDatabaseInfo(env);
 
-  const existing = await env.DB
-    .prepare(
-      "SELECT id FROM users WHERE username = ? COLLATE NOCASE"
-    )
-    .bind(username)
-    .first();
+  const existing =
+    await env.DB
+      .prepare(`
+        SELECT id
+        FROM users
+        WHERE username = ?
+        COLLATE NOCASE
+      `)
+      .bind(username)
+      .first();
 
   if (existing) {
-    throw new Error("That username is already taken.");
+    throw new Error(
+      "That username is already taken."
+    );
   }
 
-  const countResult = await env.DB
-    .prepare("SELECT COUNT(*) AS count FROM users")
-    .first();
+  const countResult =
+    await env.DB
+      .prepare(`
+        SELECT COUNT(*) AS count
+        FROM users
+      `)
+      .first();
 
-  const isFirstUser = Number(countResult?.count || 0) === 0;
-  const passwordHash = await hashPassword(password);
+  const isFirstUser =
+    Number(countResult?.count || 0) === 0;
+
+  const passwordHash =
+    await hashPassword(password);
 
   let result;
 
   if (info.hasAdminColumn) {
-    result = await env.DB
-      .prepare(`
-        INSERT INTO users(username, password_hash, is_admin)
-        VALUES (?, ?, ?)
-      `)
-      .bind(
-        username,
-        passwordHash,
-        isFirstUser ? 1 : 0
-      )
-      .run();
+
+    result =
+      await env.DB
+        .prepare(`
+          INSERT INTO users(
+            username,
+            password_hash,
+            is_admin
+          )
+          VALUES (?, ?, ?)
+        `)
+        .bind(
+          username,
+          passwordHash,
+          isFirstUser ? 1 : 0
+        )
+        .run();
+
   } else if (info.hasRoleColumn) {
-    result = await env.DB
-      .prepare(`
-        INSERT INTO users(username, password_hash, role)
-        VALUES (?, ?, ?)
-      `)
-      .bind(
-        username,
-        passwordHash,
-        isFirstUser ? "admin" : "user"
-      )
-      .run();
+
+    result =
+      await env.DB
+        .prepare(`
+          INSERT INTO users(
+            username,
+            password_hash,
+            role
+          )
+          VALUES (?, ?, ?)
+        `)
+        .bind(
+          username,
+          passwordHash,
+          isFirstUser
+            ? "admin"
+            : "user"
+        )
+        .run();
+
   } else {
+
     throw new Error(
-      "The users table is missing its admin/role column."
+      "Your users table needs an is_admin or role column."
     );
   }
 
@@ -354,13 +472,27 @@ async function createUser(env, username, password) {
 function appHTML() {
   return `<!doctype html>
 <html lang="en">
+
 <head>
+
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#f4efe6">
-<title>Lucidity — Poetry by Juan Pablo F.</title>
+
+<meta
+  name="viewport"
+  content="width=device-width,initial-scale=1"
+>
+
+<meta
+  name="theme-color"
+  content="#f4efe6"
+>
+
+<title>
+Lucidity — Poetry by Juan Pablo F.
+</title>
 
 <style>
+
 :root{
   --paper:#f4efe6;
   --ink:#1b1a18;
@@ -368,24 +500,36 @@ function appHTML() {
   --line:#d8d0c3;
   --card:#fbf8f1;
   --accent:#6e4e8f;
-  --accent2:#8b6ca8;
   --danger:#9d3d3d;
   --shadow:0 14px 45px rgba(35,28,18,.08)
 }
 
-*{box-sizing:border-box}
+*{
+  box-sizing:border-box
+}
 
-html{scroll-behavior:smooth}
+html{
+  scroll-behavior:smooth
+}
 
 body{
   margin:0;
   background:var(--paper);
   color:var(--ink);
-  font-family:Georgia,"Times New Roman",serif
+  font-family:
+    Georgia,
+    "Times New Roman",
+    serif
 }
 
-button,input,textarea{
+button,
+input,
+textarea{
   font:inherit
+}
+
+button{
+  cursor:pointer
 }
 
 .site{
@@ -395,8 +539,10 @@ button,input,textarea{
 }
 
 .top{
-  border-bottom:1px solid var(--line);
-  background:rgba(244,239,230,.9);
+  border-bottom:
+    1px solid var(--line);
+  background:
+    rgba(244,239,230,.9);
   backdrop-filter:blur(12px);
   position:sticky;
   top:0;
@@ -423,8 +569,7 @@ button,input,textarea{
   color:var(--muted);
   font-size:9px;
   letter-spacing:3px;
-  text-transform:uppercase;
-  margin-top:1px
+  text-transform:uppercase
 }
 
 .navRight{
@@ -434,7 +579,9 @@ button,input,textarea{
 }
 
 .pill{
-  font:600 12px system-ui,sans-serif;
+  font:
+    600 12px
+    system-ui,sans-serif;
   color:var(--muted)
 }
 
@@ -447,7 +594,9 @@ button,input,textarea{
 }
 
 .eyebrow{
-  font:700 11px system-ui,sans-serif;
+  font:
+    700 11px
+    system-ui,sans-serif;
   letter-spacing:3px;
   text-transform:uppercase;
   color:var(--accent);
@@ -455,7 +604,8 @@ button,input,textarea{
 }
 
 .hero h1{
-  font-size:clamp(52px,8vw,92px);
+  font-size:
+    clamp(52px,8vw,92px);
   line-height:.88;
   margin:0;
   letter-spacing:-3px;
@@ -472,7 +622,8 @@ button,input,textarea{
 .credit{
   margin-top:18px;
   color:var(--muted);
-  font:12px system-ui,sans-serif
+  font:
+    12px system-ui,sans-serif
 }
 
 .rule{
@@ -501,15 +652,15 @@ button,input,textarea{
 }
 
 button{
-  cursor:pointer;
-  border:1px solid var(--ink);
+  border:
+    1px solid var(--ink);
   border-radius:999px;
   padding:10px 16px;
   background:var(--ink);
-  color:#fff;
-  font-family:system-ui,sans-serif;
-  font-size:13px;
-  font-weight:700
+  color:white;
+  font:
+    700 13px
+    system-ui,sans-serif
 }
 
 button.secondary{
@@ -526,14 +677,16 @@ button.danger{
 
 .feed{
   display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr));
+  grid-template-columns:
+    repeat(2,minmax(0,1fr));
   gap:18px;
   padding-bottom:90px
 }
 
 .poem{
   background:var(--card);
-  border:1px solid var(--line);
+  border:
+    1px solid var(--line);
   padding:28px;
   border-radius:3px;
   box-shadow:var(--shadow);
@@ -543,7 +696,8 @@ button.danger{
 }
 
 .poem.admin{
-  border-top:3px solid var(--accent)
+  border-top:
+    3px solid var(--accent)
 }
 
 .poemTitle{
@@ -554,7 +708,8 @@ button.danger{
 }
 
 .meta{
-  font:12px system-ui,sans-serif;
+  font:
+    12px system-ui,sans-serif;
   color:var(--muted);
   margin-bottom:22px
 }
@@ -582,17 +737,21 @@ button.danger{
 }
 
 dialog{
-  width:min(580px,calc(100% - 28px));
-  border:1px solid var(--line);
+  width:
+    min(580px,calc(100% - 28px));
+  border:
+    1px solid var(--line);
   background:var(--card);
   color:var(--ink);
   padding:0;
   border-radius:4px;
-  box-shadow:0 30px 100px rgba(0,0,0,.25)
+  box-shadow:
+    0 30px 100px rgba(0,0,0,.25)
 }
 
 dialog::backdrop{
-  background:rgba(25,20,15,.5);
+  background:
+    rgba(25,20,15,.5);
   backdrop-filter:blur(3px)
 }
 
@@ -608,22 +767,27 @@ dialog::backdrop{
 
 .sub{
   color:var(--muted);
-  font:13px system-ui,sans-serif;
+  font:
+    13px system-ui,sans-serif;
   margin-bottom:22px
 }
 
 label{
   display:block;
-  font:700 12px system-ui,sans-serif;
+  font:
+    700 12px
+    system-ui,sans-serif;
   letter-spacing:1px;
   text-transform:uppercase;
   color:var(--muted);
   margin:15px 0 7px
 }
 
-input,textarea{
+input,
+textarea{
   width:100%;
-  border:1px solid var(--line);
+  border:
+    1px solid var(--line);
   background:#fffdf8;
   color:var(--ink);
   padding:13px;
@@ -631,7 +795,8 @@ input,textarea{
   outline:none
 }
 
-input:focus,textarea:focus{
+input:focus,
+textarea:focus{
   border-color:var(--accent)
 }
 
@@ -651,12 +816,14 @@ textarea{
 .error{
   min-height:20px;
   color:var(--danger);
-  font:13px system-ui,sans-serif;
+  font:
+    13px system-ui,sans-serif;
   margin-top:10px
 }
 
 .switch{
-  font:13px system-ui,sans-serif;
+  font:
+    13px system-ui,sans-serif;
   color:var(--muted);
   text-align:center;
   margin:18px 0 0
@@ -674,10 +841,11 @@ textarea{
   bottom:24px;
   transform:translateX(-50%);
   background:var(--ink);
-  color:#fff;
+  color:white;
   padding:12px 17px;
   border-radius:999px;
-  font:13px system-ui,sans-serif;
+  font:
+    13px system-ui,sans-serif;
   opacity:0;
   pointer-events:none;
   transition:.2s;
@@ -690,11 +858,13 @@ textarea{
 
 .loading{
   color:var(--muted);
-  font:13px system-ui,sans-serif;
+  font:
+    13px system-ui,sans-serif;
   padding:20px 0
 }
 
 @media(max-width:760px){
+
   .hero{
     grid-template-columns:1fr;
     gap:24px;
@@ -725,80 +895,135 @@ textarea{
     padding:23px
   }
 }
+
 </style>
+
 </head>
 
 <body>
 
 <header class="top">
-<nav class="site nav">
-  <div class="brand">
-    Lucidity
-    <small>Poetry Archive</small>
-  </div>
 
-  <div class="navRight">
-    <span class="pill" id="who"></span>
-    <button class="secondary" id="authButton">Log in</button>
-  </div>
+<nav class="site nav">
+
+<div class="brand">
+
+Lucidity
+
+<small>
+Poetry Archive
+</small>
+
+</div>
+
+<div class="navRight">
+
+<span
+  class="pill"
+  id="who"
+></span>
+
+<button
+  class="secondary"
+  id="authButton"
+  type="button"
+>
+Log in
+</button>
+
+</div>
+
 </nav>
+
 </header>
 
 <main class="site">
 
 <section class="hero">
 
-  <div>
-    <div class="eyebrow">A place for words</div>
+<div>
 
-    <h1>
-      Write what<br>
-      you cannot say.
-    </h1>
+<div class="eyebrow">
+A place for words
+</div>
 
-    <div class="credit">
-      A poetry archive by Juan Pablo F.
-    </div>
-  </div>
+<h1>
+Write what<br>
+you cannot say.
+</h1>
 
-  <p>
-    Poems by people who wanted their words
-    to exist somewhere outside their heads.
-  </p>
+<div class="credit">
+A poetry archive by Juan Pablo F.
+</div>
+
+</div>
+
+<p>
+Poems by people who wanted their words
+to exist somewhere outside their heads.
+</p>
 
 </section>
 
 <div class="rule"></div>
 
 <section class="toolbar">
-  <h2>Recent poems</h2>
 
-  <div class="buttons">
-    <button id="newButton">Write a poem</button>
-  </div>
+<h2>
+Recent poems
+</h2>
+
+<div class="buttons">
+
+<button
+  id="newButton"
+  type="button"
+>
+Write a poem
+</button>
+
+</div>
+
 </section>
 
-<section id="feed" class="feed">
-  <div class="loading">Loading poems…</div>
+<section
+  id="feed"
+  class="feed"
+>
+
+<div class="loading">
+Loading poems…
+</div>
+
 </section>
 
 </main>
 
-<div id="toast" class="toast"></div>
+<div
+  id="toast"
+  class="toast"
+></div>
 
 <dialog id="authDialog">
 
 <div class="modal">
 
-<h2 id="authHeading">Log in</h2>
+<h2 id="authHeading">
+Log in
+</h2>
 
-<div class="sub" id="authSub">
+<div
+  class="sub"
+  id="authSub"
+>
 Return to your writing.
 </div>
 
 <form id="authForm">
 
-<label>Username</label>
+<label>
+Username
+</label>
 
 <input
   id="username"
@@ -808,7 +1033,9 @@ Return to your writing.
   maxlength="30"
 >
 
-<label>Password</label>
+<label>
+Password
+</label>
 
 <input
   id="password"
@@ -818,7 +1045,10 @@ Return to your writing.
   minlength="8"
 >
 
-<div id="authError" class="error"></div>
+<div
+  id="authError"
+  class="error"
+></div>
 
 <div class="formActions">
 
@@ -830,7 +1060,10 @@ Return to your writing.
 Cancel
 </button>
 
-<button id="authSubmit">
+<button
+  type="submit"
+  id="authSubmit"
+>
 Log in
 </button>
 
@@ -840,9 +1073,14 @@ Log in
 
 <div class="switch">
 
-<span id="switchLabel">New here?</span>
+<span id="switchLabel">
+New here?
+</span>
 
-<a id="switchAuth">
+<a
+  id="switchAuth"
+  href="#"
+>
 Create an account
 </a>
 
@@ -866,7 +1104,9 @@ Put it here. You can change or remove it later.
 
 <form id="poemForm">
 
-<label>Title</label>
+<label>
+Title
+</label>
 
 <input
   id="poemTitle"
@@ -874,7 +1114,9 @@ Put it here. You can change or remove it later.
   required
 >
 
-<label>Your poem</label>
+<label>
+Your poem
+</label>
 
 <textarea
   id="poemBody"
@@ -882,7 +1124,10 @@ Put it here. You can change or remove it later.
   required
 ></textarea>
 
-<div id="poemError" class="error"></div>
+<div
+  id="poemError"
+  class="error"
+></div>
 
 <div class="formActions">
 
@@ -894,7 +1139,10 @@ Put it here. You can change or remove it later.
 Cancel
 </button>
 
-<button id="poemSubmit">
+<button
+  type="submit"
+  id="poemSubmit"
+>
 Publish poem
 </button>
 
@@ -907,7 +1155,8 @@ Publish poem
 </dialog>
 
 <script>
-(function(){
+
+(() => {
 
   const state = {
     user: null,
@@ -915,38 +1164,56 @@ Publish poem
     authMode: "login"
   };
 
-  const $ = id => document.getElementById(id);
+  const $ =
+    id => document.getElementById(id);
 
   const esc = value =>
-    String(value ?? "").replace(/[&<>"']/g, c => ({
-      "&":"&amp;",
-      "<":"&lt;",
-      ">":"&gt;",
-      "\"":"&quot;",
-      "'":"&#39;"
-    }[c]));
+    String(value ?? "")
+      .replace(/[&<>"']/g, character => ({
+        "&":"&amp;",
+        "<":"&lt;",
+        ">":"&gt;",
+        "\"":"&quot;",
+        "'":"&#39;"
+      }[character]));
 
-  async function api(url, options = {}) {
+  async function api(
+    url,
+    options = {}
+  ) {
 
     const headers = {
-      "content-type": "application/json",
+      ...(options.body
+        ? {
+            "content-type":
+              "application/json"
+          }
+        : {}),
       ...(options.headers || {})
     };
 
-    const response = await fetch(url, {
-      ...options,
-      headers
-    });
+    const response =
+      await fetch(
+        url,
+        {
+          ...options,
+          headers,
+          credentials:"same-origin"
+        }
+      );
 
     let data = {};
 
     try {
-      data = await response.json();
+      data =
+        await response.json();
     } catch {}
 
     if (!response.ok) {
+
       throw new Error(
-        data.error || `Request failed (${response.status})`
+        data.error ||
+        `Request failed (${response.status})`
       );
     }
 
@@ -955,431 +1222,562 @@ Publish poem
 
   function toast(message) {
 
-    const element = $("toast");
+    const element =
+      $("toast");
 
-    element.textContent = message;
+    element.textContent =
+      message;
+
     element.classList.add("show");
 
-    clearTimeout(toast.timer);
+    clearTimeout(
+      toast.timer
+    );
 
-    toast.timer = setTimeout(() => {
-      element.classList.remove("show");
-    }, 2500);
+    toast.timer =
+      setTimeout(
+        () =>
+          element.classList.remove(
+            "show"
+          ),
+        2500
+      );
   }
 
-  function openAuth(mode = "login") {
+  function openAuth(
+    mode = "login"
+  ) {
 
-    state.authMode = mode;
+    state.authMode =
+      mode;
 
     renderAuth();
 
     $("authDialog").showModal();
 
-    setTimeout(() => {
-      $("username").focus();
-    }, 50);
+    setTimeout(
+      () => $("username").focus(),
+      50
+    );
   }
 
   function renderAuth() {
 
-    const register = state.authMode === "register";
+    const register =
+      state.authMode ===
+      "register";
 
-    $("authHeading").textContent =
-      register ? "Create an account" : "Log in";
+    $("authHeading")
+      .textContent =
+      register
+        ? "Create an account"
+        : "Log in";
 
-    $("authSub").textContent =
+    $("authSub")
+      .textContent =
       register
         ? "Create a place for your words."
         : "Return to your writing.";
 
-    $("authSubmit").textContent =
-      register ? "Create account" : "Log in";
+    $("authSubmit")
+      .textContent =
+      register
+        ? "Create account"
+        : "Log in";
 
-    $("switchLabel").textContent =
+    $("switchLabel")
+      .textContent =
       register
         ? "Already have an account?"
         : "New here?";
 
-    $("switchAuth").textContent =
+    $("switchAuth")
+      .textContent =
       register
         ? "Log in"
         : "Create an account";
 
-    $("authError").textContent = "";
+    $("authError")
+      .textContent = "";
   }
 
   function openNew() {
 
     if (!state.user) {
+
       openAuth("login");
+
       return;
     }
 
-    state.editingId = null;
+    state.editingId =
+      null;
 
-    $("poemHeading").textContent = "Write a poem";
-    $("poemSubmit").textContent = "Publish poem";
+    $("poemHeading")
+      .textContent =
+      "Write a poem";
 
-    $("poemTitle").value = "";
-    $("poemBody").value = "";
-    $("poemError").textContent = "";
+    $("poemSubmit")
+      .textContent =
+      "Publish poem";
 
-    $("poemDialog").showModal();
+    $("poemTitle").value =
+      "";
+
+    $("poemBody").value =
+      "";
+
+    $("poemError")
+      .textContent = "";
+
+    $("poemDialog")
+      .showModal();
   }
 
-  function openEdit(id, title, body) {
+  function openEdit(
+    id,
+    title,
+    body
+  ) {
 
-    state.editingId = id;
+    state.editingId =
+      id;
 
-    $("poemHeading").textContent = "Edit poem";
-    $("poemSubmit").textContent = "Save changes";
+    $("poemHeading")
+      .textContent =
+      "Edit poem";
 
-    $("poemTitle").value = title;
-    $("poemBody").value = body;
+    $("poemSubmit")
+      .textContent =
+      "Save changes";
 
-    $("poemError").textContent = "";
+    $("poemTitle").value =
+      title;
 
-    $("poemDialog").showModal();
+    $("poemBody").value =
+      body;
+
+    $("poemError")
+      .textContent = "";
+
+    $("poemDialog")
+      .showModal();
   }
 
   async function refreshUser() {
 
-    const data = await api("/api/me");
+    const data =
+      await api("/api/me");
 
-    state.user = data.user;
+    state.user =
+      data.user;
 
     if (state.user) {
 
-      $("who").textContent =
+      $("who")
+        .textContent =
         "@" +
         state.user.username +
-        (state.user.is_admin ? " · ADMIN" : "");
+        (
+          state.user.is_admin
+            ? " · ADMIN"
+            : ""
+        );
 
-      $("authButton").textContent = "Log out";
+      $("authButton")
+        .textContent =
+        "Log out";
 
     } else {
 
-      $("who").textContent = "";
-      $("authButton").textContent = "Log in";
+      $("who")
+        .textContent = "";
+
+      $("authButton")
+        .textContent =
+        "Log in";
     }
   }
 
   async function loadPoems() {
 
-    const data = await api("/api/poems");
+    const data =
+      await api("/api/poems");
 
-    const feed = $("feed");
+    const feed =
+      $("feed");
 
-    if (!data.poems || !data.poems.length) {
+    if (
+      !data.poems ||
+      !data.poems.length
+    ) {
 
       feed.innerHTML = `
         <div class="empty">
           No poems yet.<br><br>
-          Be the first person to leave a few words here.
+          Be the first person to leave
+          a few words here.
         </div>
       `;
 
       return;
     }
 
-    feed.innerHTML = data.poems.map(poem => {
+    feed.innerHTML =
+      data.poems
+        .map(poem => {
 
-      const canModify =
-        state.user &&
-        (
-          state.user.is_admin ||
-          Number(state.user.id) === Number(poem.user_id)
+          const canModify =
+            state.user &&
+            (
+              state.user.is_admin ||
+              Number(state.user.id) ===
+                Number(poem.user_id)
+            );
+
+          const adminClass =
+            state.user &&
+            state.user.is_admin
+              ? "admin"
+              : "";
+
+          const actions =
+            canModify
+              ? `
+                <div class="actions">
+
+                  <button
+                    class="secondary edit"
+                    type="button"
+                    data-id="${poem.id}"
+                    data-title="${encodeURIComponent(
+                      poem.title
+                    )}"
+                    data-body="${encodeURIComponent(
+                      poem.body
+                    )}"
+                  >
+                    Edit
+                  </button>
+
+                  <button
+                    class="danger delete"
+                    type="button"
+                    data-id="${poem.id}"
+                  >
+                    Delete
+                  </button>
+
+                </div>
+              `
+              : "";
+
+          return `
+            <article
+              class="poem ${adminClass}"
+            >
+
+              <h3 class="poemTitle">
+                ${esc(poem.title)}
+              </h3>
+
+              <div class="meta">
+                by @${esc(poem.username)}
+                · ${esc(
+                  poem.updated_at ||
+                  poem.created_at ||
+                  ""
+                )}
+              </div>
+
+              <div class="poemBody">
+                ${esc(poem.body)}
+              </div>
+
+              ${actions}
+
+            </article>
+          `;
+        })
+        .join("");
+
+    feed
+      .querySelectorAll(".edit")
+      .forEach(button => {
+
+        button.addEventListener(
+          "click",
+          () => {
+
+            openEdit(
+              Number(
+                button.dataset.id
+              ),
+              decodeURIComponent(
+                button.dataset.title
+              ),
+              decodeURIComponent(
+                button.dataset.body
+              )
+            );
+          }
         );
-
-      const adminClass =
-        state.user && state.user.is_admin
-          ? "admin"
-          : "";
-
-      const editButton = canModify
-        ? `
-          <button
-            class="secondary edit"
-            data-id="${poem.id}"
-            data-title="${encodeURIComponent(poem.title)}"
-            data-body="${encodeURIComponent(poem.body)}"
-          >
-            Edit
-          </button>
-        `
-        : "";
-
-      const deleteButton = canModify
-        ? `
-          <button
-            class="danger delete"
-            data-id="${poem.id}"
-          >
-            Delete
-          </button>
-        `
-        : "";
-
-      const actions =
-        canModify
-          ? `
-            <div class="actions">
-              ${editButton}
-              ${deleteButton}
-            </div>
-          `
-          : "";
-
-      return `
-        <article class="poem ${adminClass}">
-
-          <h3 class="poemTitle">
-            ${esc(poem.title)}
-          </h3>
-
-          <div class="meta">
-            by @${esc(poem.username)}
-            · ${esc(poem.updated_at || poem.created_at || "")}
-          </div>
-
-          <div class="poemBody">
-            ${esc(poem.body)}
-          </div>
-
-          ${actions}
-
-        </article>
-      `;
-
-    }).join("");
-
-    feed.querySelectorAll(".edit").forEach(button => {
-
-      button.addEventListener("click", () => {
-
-        openEdit(
-          Number(button.dataset.id),
-          decodeURIComponent(button.dataset.title),
-          decodeURIComponent(button.dataset.body)
-        );
-
       });
 
-    });
+    feed
+      .querySelectorAll(".delete")
+      .forEach(button => {
 
-    feed.querySelectorAll(".delete").forEach(button => {
+        button.addEventListener(
+          "click",
+          async () => {
 
-      button.addEventListener("click", async () => {
+            if (
+              !confirm(
+                "Delete this poem? This cannot be undone."
+              )
+            ) {
+              return;
+            }
 
-        if (
-          !confirm(
-            "Delete this poem? This cannot be undone."
-          )
-        ) {
+            try {
+
+              await api(
+                "/api/poems/" +
+                  button.dataset.id,
+                {
+                  method:"DELETE"
+                }
+              );
+
+              toast(
+                "Poem deleted."
+              );
+
+              await loadPoems();
+
+            } catch (error) {
+
+              toast(
+                error.message
+              );
+            }
+          }
+        );
+      });
+  }
+
+  $("authButton")
+    .addEventListener(
+      "click",
+      async () => {
+
+        if (!state.user) {
+
+          openAuth("login");
+
           return;
         }
 
         try {
 
           await api(
-            "/api/poems/" + button.dataset.id,
+            "/api/logout",
             {
-              method: "DELETE"
+              method:"POST"
             }
           );
 
-          toast("Poem deleted.");
+          state.user =
+            null;
 
+          await refreshUser();
           await loadPoems();
+
+          toast(
+            "Logged out."
+          );
 
         } catch (error) {
 
-          toast(error.message);
+          toast(
+            error.message
+          );
         }
-
-      });
-
-    });
-  }
-
-  $("authButton").addEventListener(
-    "click",
-    async () => {
-
-      if (!state.user) {
-
-        openAuth("login");
-        return;
       }
+    );
 
-      try {
+  $("newButton")
+    .addEventListener(
+      "click",
+      openNew
+    );
 
-        await api(
-          "/api/logout",
-          {
-            method: "POST"
-          }
-        );
+  $("authCancel")
+    .addEventListener(
+      "click",
+      () =>
+        $("authDialog").close()
+    );
 
-        state.user = null;
+  $("poemCancel")
+    .addEventListener(
+      "click",
+      () =>
+        $("poemDialog").close()
+    );
 
-        await refreshUser();
-        await loadPoems();
+  $("switchAuth")
+    .addEventListener(
+      "click",
+      event => {
 
-        toast("Logged out.");
+        event.preventDefault();
 
-      } catch (error) {
+        state.authMode =
+          state.authMode === "login"
+            ? "register"
+            : "login";
 
-        toast(error.message);
+        renderAuth();
       }
-    }
-  );
+    );
 
-  $("newButton").addEventListener(
-    "click",
-    openNew
-  );
+  $("authForm")
+    .addEventListener(
+      "submit",
+      async event => {
 
-  $("authCancel").addEventListener(
-    "click",
-    () => $("authDialog").close()
-  );
+        event.preventDefault();
 
-  $("poemCancel").addEventListener(
-    "click",
-    () => $("poemDialog").close()
-  );
+        $("authError")
+          .textContent = "";
 
-  $("switchAuth").addEventListener(
-    "click",
-    () => {
+        const username =
+          $("username")
+            .value
+            .trim();
 
-      state.authMode =
-        state.authMode === "login"
-          ? "register"
-          : "login";
+        const password =
+          $("password")
+            .value;
 
-      renderAuth();
-    }
-  );
-
-  $("authForm").addEventListener(
-    "submit",
-    async event => {
-
-      event.preventDefault();
-
-      $("authError").textContent = "";
-
-      const username =
-        $("username").value.trim();
-
-      const password =
-        $("password").value;
-
-      try {
-
-        await api(
-          "/api/" + state.authMode,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              username,
-              password
-            })
-          }
-        );
-
-        $("authDialog").close();
-
-        $("authForm").reset();
-
-        await refreshUser();
-        await loadPoems();
-
-        toast(
-          state.authMode === "register"
-            ? "Account created."
-            : "Welcome back."
-        );
-
-      } catch (error) {
-
-        $("authError").textContent =
-          error.message;
-      }
-    }
-  );
-
-  $("poemForm").addEventListener(
-    "submit",
-    async event => {
-
-      event.preventDefault();
-
-      $("poemError").textContent = "";
-
-      const title =
-        $("poemTitle").value.trim();
-
-      const body =
-        $("poemBody").value;
-
-      try {
-
-        if (state.editingId) {
+        try {
 
           await api(
-            "/api/poems/" + state.editingId,
+            "/api/" +
+              state.authMode,
             {
-              method: "PUT",
-              body: JSON.stringify({
-                title,
-                body
+              method:"POST",
+              body:JSON.stringify({
+                username,
+                password
               })
             }
           );
 
-        } else {
+          $("authDialog")
+            .close();
 
-          await api(
-            "/api/poems",
-            {
-              method: "POST",
-              body: JSON.stringify({
-                title,
-                body
-              })
-            }
+          $("authForm")
+            .reset();
+
+          await refreshUser();
+          await loadPoems();
+
+          toast(
+            state.authMode ===
+              "register"
+              ? "Account created."
+              : "Welcome back."
           );
+
+        } catch (error) {
+
+          $("authError")
+            .textContent =
+            error.message;
         }
-
-        $("poemDialog").close();
-
-        await loadPoems();
-
-        toast(
-          state.editingId
-            ? "Poem updated."
-            : "Poem published."
-        );
-
-        state.editingId = null;
-
-      } catch (error) {
-
-        $("poemError").textContent =
-          error.message;
       }
-    }
-  );
+    );
+
+  $("poemForm")
+    .addEventListener(
+      "submit",
+      async event => {
+
+        event.preventDefault();
+
+        $("poemError")
+          .textContent = "";
+
+        const title =
+          $("poemTitle")
+            .value
+            .trim();
+
+        const body =
+          $("poemBody")
+            .value;
+
+        try {
+
+          if (state.editingId) {
+
+            await api(
+              "/api/poems/" +
+                state.editingId,
+              {
+                method:"PUT",
+                body:JSON.stringify({
+                  title,
+                  body
+                })
+              }
+            );
+
+          } else {
+
+            await api(
+              "/api/poems",
+              {
+                method:"POST",
+                body:JSON.stringify({
+                  title,
+                  body
+                })
+              }
+            );
+          }
+
+          $("poemDialog")
+            .close();
+
+          await loadPoems();
+
+          toast(
+            state.editingId
+              ? "Poem updated."
+              : "Poem published."
+          );
+
+          state.editingId =
+            null;
+
+        } catch (error) {
+
+          $("poemError")
+            .textContent =
+            error.message;
+        }
+      }
+    );
 
   async function start() {
 
     try {
 
       await refreshUser();
-
       await loadPoems();
 
     } catch (error) {
@@ -1388,8 +1786,11 @@ Publish poem
 
       $("feed").innerHTML = `
         <div class="empty">
-          The site could not load its data.<br><br>
-          <small>${esc(error.message)}</small>
+          The site could not load its data.
+          <br><br>
+          <small>
+            ${esc(error.message)}
+          </small>
         </div>
       `;
     }
@@ -1398,6 +1799,7 @@ Publish poem
   start();
 
 })();
+
 </script>
 
 </body>
@@ -1406,15 +1808,15 @@ Publish poem
 
 export default {
 
-  async fetch(request, env) {
+  async fetch(
+    request,
+    env
+  ) {
 
-    const url = new URL(request.url);
+    const url =
+      new URL(request.url);
 
     try {
-
-      /*
-       * MAIN WEBSITE
-       */
 
       if (
         request.method === "GET" &&
@@ -1427,15 +1829,12 @@ export default {
             headers: {
               "content-type":
                 "text/html; charset=UTF-8",
-              "cache-control": "no-store"
+              "cache-control":
+                "no-store"
             }
           }
         );
       }
-
-      /*
-       * CURRENT USER
-       */
 
       if (
         request.method === "GET" &&
@@ -1443,13 +1842,13 @@ export default {
       ) {
 
         return json({
-          user: await getUser(request, env)
+          user:
+            await getUser(
+              request,
+              env
+            )
         });
       }
-
-      /*
-       * REGISTER
-       */
 
       if (
         request.method === "POST" &&
@@ -1459,22 +1858,34 @@ export default {
         let body;
 
         try {
-          body = await request.json();
+
+          body =
+            await request.json();
+
         } catch {
+
           return json(
-            { error: "Invalid request." },
+            {
+              error:
+                "Invalid request."
+            },
             400
           );
         }
 
         const username =
-          String(body.username || "").trim();
+          String(
+            body.username || ""
+          ).trim();
 
         const password =
-          String(body.password || "");
+          String(
+            body.password || ""
+          );
 
         if (
-          !/^[A-Za-z0-9_]{3,30}$/.test(username)
+          !/^[A-Za-z0-9_]{3,30}$/
+            .test(username)
         ) {
 
           return json(
@@ -1486,7 +1897,9 @@ export default {
           );
         }
 
-        if (password.length < 8) {
+        if (
+          password.length < 8
+        ) {
 
           return json(
             {
@@ -1514,11 +1927,12 @@ export default {
 
           return json(
             {
-              ok: true,
-              user: {
-                id: user.id,
+              ok:true,
+              user:{
+                id:user.id,
                 username,
-                is_admin: user.is_admin
+                is_admin:
+                  user.is_admin
               }
             },
             200,
@@ -1535,8 +1949,13 @@ export default {
             error
           );
 
+          const message =
+            String(
+              error?.message || ""
+            );
+
           if (
-            String(error.message || "")
+            message
               .toLowerCase()
               .includes("unique")
           ) {
@@ -1553,17 +1972,13 @@ export default {
           return json(
             {
               error:
-                error.message ||
+                message ||
                 "Could not create account."
             },
             500
           );
         }
       }
-
-      /*
-       * LOGIN
-       */
 
       if (
         request.method === "POST" &&
@@ -1573,36 +1988,88 @@ export default {
         let body;
 
         try {
-          body = await request.json();
+
+          body =
+            await request.json();
+
         } catch {
+
           return json(
-            { error: "Invalid request." },
+            {
+              error:
+                "Invalid request."
+            },
             400
           );
         }
 
         const username =
-          String(body.username || "").trim();
+          String(
+            body.username || ""
+          ).trim();
 
         const password =
-          String(body.password || "");
+          String(
+            body.password || ""
+          );
 
         const info =
-          await getDatabaseInfo(env);
+          await getDatabaseInfo(
+            env
+          );
 
-        const columns =
-          info.hasAdminColumn
-                  ? "id, username, is_admin"
-          : "id, username, role";
+        let user;
 
-        const user = await env.DB
-          .prepare(
-            `SELECT ${columns}
-             FROM users
-             WHERE username = ? COLLATE NOCASE`
-          )
-          .bind(username)
-          .first();
+        if (info.hasAdminColumn) {
+
+          user =
+            await env.DB
+              .prepare(`
+                SELECT
+                  id,
+                  username,
+                  password_hash,
+                  is_admin
+                FROM users
+                WHERE username = ?
+                COLLATE NOCASE
+              `)
+              .bind(username)
+              .first();
+
+        } else if (info.hasRoleColumn) {
+
+          user =
+            await env.DB
+              .prepare(`
+                SELECT
+                  id,
+                  username,
+                  password_hash,
+                  role
+                FROM users
+                WHERE username = ?
+                COLLATE NOCASE
+              `)
+              .bind(username)
+              .first();
+
+        } else {
+
+          user =
+            await env.DB
+              .prepare(`
+                SELECT
+                  id,
+                  username,
+                  password_hash
+                FROM users
+                WHERE username = ?
+                COLLATE NOCASE
+              `)
+              .bind(username)
+              .first();
+        }
 
         if (
           !user ||
@@ -1611,6 +2078,7 @@ export default {
             user.password_hash
           ))
         ) {
+
           return json(
             {
               error:
@@ -1626,15 +2094,20 @@ export default {
             env
           );
 
+        const isAdmin =
+          info.hasAdminColumn
+            ? !!user.is_admin
+            : info.hasRoleColumn
+              ? user.role === "admin"
+              : false;
+
         return json(
           {
-            ok: true,
-            user: {
-              id: user.id,
-              username: user.username,
-              is_admin: info.hasAdminColumn
-                ? !!user.is_admin
-                : user.role === "admin"
+            ok:true,
+            user:{
+              id:user.id,
+              username:user.username,
+              is_admin:isAdmin
             }
           },
           200,
@@ -1645,21 +2118,20 @@ export default {
         );
       }
 
-      /*
-       * LOGOUT
-       */
-
       if (
         request.method === "POST" &&
         url.pathname === "/api/logout"
       ) {
 
         try {
+
           await deleteSession(
             request,
             env
           );
+
         } catch (error) {
+
           console.error(
             "LOGOUT ERROR:",
             error
@@ -1667,7 +2139,7 @@ export default {
         }
 
         return json(
-          { ok: true },
+          { ok:true },
           200,
           {
             "set-cookie":
@@ -1675,10 +2147,6 @@ export default {
           }
         );
       }
-
-      /*
-       * GET POEMS
-       */
 
       if (
         request.method === "GET" &&
@@ -1706,13 +2174,10 @@ export default {
             .all();
 
         return json({
-          poems: result.results || []
+          poems:
+            result.results || []
         });
       }
-
-      /*
-       * CREATE POEM
-       */
 
       if (
         request.method === "POST" &&
@@ -1726,6 +2191,7 @@ export default {
           );
 
         if (!user) {
+
           return json(
             {
               error:
@@ -1738,8 +2204,12 @@ export default {
         let body;
 
         try {
-          body = await request.json();
+
+          body =
+            await request.json();
+
         } catch {
+
           return json(
             {
               error:
@@ -1750,12 +2220,20 @@ export default {
         }
 
         const title =
-          String(body.title || "").trim();
+          String(
+            body.title || ""
+          ).trim();
 
         const poemBody =
-          String(body.body || "");
+          String(
+            body.body || ""
+          );
 
-        if (!title || !poemBody.trim()) {
+        if (
+          !title ||
+          !poemBody.trim()
+        ) {
+
           return json(
             {
               error:
@@ -1769,6 +2247,7 @@ export default {
           title.length > 120 ||
           poemBody.length > 20000
         ) {
+
           return json(
             {
               error:
@@ -1795,13 +2274,9 @@ export default {
           .run();
 
         return json({
-          ok: true
+          ok:true
         });
       }
-
-      /*
-       * EDIT / DELETE POEM
-       */
 
       const poemMatch =
         url.pathname.match(
@@ -1823,6 +2298,7 @@ export default {
           );
 
         if (!user) {
+
           return json(
             {
               error:
@@ -1833,7 +2309,9 @@ export default {
         }
 
         const poemId =
-          Number(poemMatch[1]);
+          Number(
+            poemMatch[1]
+          );
 
         const poem =
           await env.DB
@@ -1844,6 +2322,7 @@ export default {
             .first();
 
         if (!poem) {
+
           return json(
             {
               error:
@@ -1858,6 +2337,7 @@ export default {
           Number(poem.user_id) !==
             Number(user.id)
         ) {
+
           return json(
             {
               error:
@@ -1866,10 +2346,6 @@ export default {
             403
           );
         }
-
-        /*
-         * DELETE
-         */
 
         if (
           request.method === "DELETE"
@@ -1883,19 +2359,19 @@ export default {
             .run();
 
           return json({
-            ok: true
+            ok:true
           });
         }
-
-        /*
-         * EDIT
-         */
 
         let body;
 
         try {
-          body = await request.json();
+
+          body =
+            await request.json();
+
         } catch {
+
           return json(
             {
               error:
@@ -1906,12 +2382,20 @@ export default {
         }
 
         const title =
-          String(body.title || "").trim();
+          String(
+            body.title || ""
+          ).trim();
 
         const poemBody =
-          String(body.body || "");
+          String(
+            body.body || ""
+          );
 
-        if (!title || !poemBody.trim()) {
+        if (
+          !title ||
+          !poemBody.trim()
+        ) {
+
           return json(
             {
               error:
@@ -1925,6 +2409,7 @@ export default {
           title.length > 120 ||
           poemBody.length > 20000
         ) {
+
           return json(
             {
               error:
@@ -1951,19 +2436,15 @@ export default {
           .run();
 
         return json({
-          ok: true
+          ok:true
         });
       }
-
-      /*
-       * UNKNOWN ROUTE
-       */
 
       return new Response(
         "Not found",
         {
-          status: 404,
-          headers: {
+          status:404,
+          headers:{
             "content-type":
               "text/plain; charset=UTF-8"
           }
@@ -1988,4 +2469,3 @@ export default {
     }
   }
 };
-           
