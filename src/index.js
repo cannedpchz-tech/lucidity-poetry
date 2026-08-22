@@ -1647,7 +1647,7 @@ export default {
 
       const poemMatch =
         url.pathname.match(
-          /^\\/api\\/poems\\/(\\d+)$/
+          /^\/api\/poems\/(\d+)$/
         );
 
       if (
