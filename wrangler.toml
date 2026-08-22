@@ -1,0 +1,8 @@
+name = "lucidity-poetry"
+main = "src/index.js"
+compatibility_date = "2026-08-21"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "lucidity-poetry-db"
+database_id = "3c584616-d7cf-4d63-b142-3387b64af3df"
